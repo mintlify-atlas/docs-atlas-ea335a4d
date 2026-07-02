@@ -1,0 +1,146 @@
+---
+title: "PES6 Memory Address Reference"
+sidebarTitle: "PES Addresses"
+description: "All PES6 binary offsets and runtime struct offsets used by the mod: hook sites, return targets, function calls, ball pointer, and player cell coordinates."
+---
+
+The mod targets specific addresses in the unmodified retail release of `pes6.exe`. All offsets are stored in two namespaces in `PesAddresses.h`: `PesAddresses` (relative to the EXE base, added at runtime to `GetModuleHandleA(nullptr)`) and `PesOffsets` (byte offsets within runtime game structs accessed through live game pointers).
+
+## Complete Source: PesAddresses.h
+
+```cpp
+#pragma once
+
+#include <stdint.h>
+
+// ------------------------------------------------------------
+// Offsets relativos a pes6.exe
+// ------------------------------------------------------------
+
+namespace PesAddresses
+{
+    // Hook A:
+    // Contexto del pase.
+    // Aquí esta:
+    //   EDX = pasador
+    //   ESI = receptor
+    constexpr uintptr_t PASS_CONTEXT_HOOK = 0x1A5905;
+
+    // Retorno después del hook de contexto.
+    // Reemplazamos 7 bytes:
+    //   call pes6.exe+1A1570
+    //   mov ebx,eax
+    constexpr uintptr_t PASS_CONTEXT_RETURN = 0x1A590C;
+
+    // Función original llamada en el hook de contexto.
+    constexpr uintptr_t CALL_1A1570 = 0x1A1570;
+
+    // Hook B:
+    // Potencia del pase.
+    // Aquí EDI contiene la potencia calculada antes de llamar a 78020.
+    constexpr uintptr_t PASS_POWER_HOOK = 0x1A637B;
+
+    // Retorno después del hook de potencia.
+    // Reemplazamos 11 bytes:
+    //   push 00
+    //   push ebp
+    //   push edi
+    //   push eax
+    //   push esi
+    //   call pes6.exe+78020
+    constexpr uintptr_t PASS_POWER_RETURN = 0x1A6386;
+
+    // Función que aplica parámetros a la pelota.
+    // Esta termina escribiendo el valor de EDI en ball+50.
+    constexpr uintptr_t CALL_78020 = 0x78020;
+
+    // Puntero global de pelota:
+    // [pes6.exe+7CCE94] = ball base
+    constexpr uintptr_t BALL_GLOBAL_PTR = 0x7CCE94;
+}
+
+// ------------------------------------------------------------
+// Offsets dentro de estructuras runtime
+// ------------------------------------------------------------
+
+namespace PesOffsets
+{
+    // Coordenadas discretas del jugador.
+    // Usadas para calcular distancia simple entre pasador/receptor.
+    constexpr uintptr_t PLAYER_CELL_X = 0x204;
+    constexpr uintptr_t PLAYER_CELL_Y = 0x205;
+
+    // Potencia/inercia principal de la pelota.
+    constexpr uintptr_t BALL_POWER = 0x50;
+}
+```
+
+## PesAddresses Namespace
+
+Each constant in the `PesAddresses` namespace is an offset relative to the `pes6.exe` module base. At runtime the mod resolves the base via `GetModuleHandleA(nullptr)` and adds the offset to form the final absolute address.
+
+| Constant | Value | Description |
+|---|---|---|
+| `PASS_CONTEXT_HOOK` | `0x1A5905` | Site of Hook A. 7 bytes replaced (`call pes6.exe+1A1570` + `mov ebx,eax`). At this point ESI = passer, EDX = receiver. |
+| `PASS_CONTEXT_RETURN` | `0x1A590C` | Return address after the Hook A trampoline jumps back into game code. |
+| `CALL_1A1570` | `0x1A1570` | Original function called at the Hook A site. Re-called verbatim inside the trampoline before returning. |
+| `PASS_POWER_HOOK` | `0x1A637B` | Site of Hook B. 11 bytes replaced (`push 00` / `push ebp` / `push edi` / `push eax` / `push esi` / `call pes6.exe+78020`). EDI holds the calculated pass power value. |
+| `PASS_POWER_RETURN` | `0x1A6386` | Return address after the Hook B trampoline jumps back into game code. |
+| `CALL_78020` | `0x78020` | Original function that writes EDI into the ball physics state. Re-called inside the Hook B trampoline after EDI has been rescaled. Ends up writing the final value to `ball+0x50`. |
+| `BALL_GLOBAL_PTR` | `0x7CCE94` | Address of the global ball pointer. Dereference once (`*(DWORD*)(base + 0x7CCE94)`) to obtain the ball struct base address. |
+
+## PesOffsets Namespace
+
+These are byte offsets applied directly to a live runtime struct pointer (player or ball) to reach a specific field.
+
+| Constant | Value | Description |
+|---|---|---|
+| `PLAYER_CELL_X` | `0x204` | Player struct offset for the discrete X cell coordinate (1 byte). Used to compute Manhattan distance between passer and receiver. |
+| `PLAYER_CELL_Y` | `0x205` | Player struct offset for the discrete Y/Z cell coordinate (1 byte). Paired with `PLAYER_CELL_X` to form a 2-D grid position. |
+| `BALL_POWER` | `0x50` | Ball struct offset for the pass power / inertia value (4 bytes, DWORD). Read before `CALL_78020` fires to capture the previous inertia state; overwritten by that function with the new EDI. |
+
+## Additional Runtime Offsets
+
+The following offsets were discovered during development via Cheat Engine analysis. They are used directly in `PassContext.cpp` and `PassPower.cpp` and are not exposed as named constants in any header file.
+
+### Player Struct
+
+| Offset | Type | Description |
+|---|---|---|
+| `player + 0xE0` | `float` | Logic position X (world space) |
+| `player + 0xE4` | `float` | Logic position Y — vertical axis |
+| `player + 0xE8` | `float` | Logic position Z/Y (pitch plane) |
+| `player + 0xD0` | `DWORD*` | Pointer to the player's physics sub-struct |
+| `player + 0x114` | `DWORD` | Raw ball-distance value — represents proximity/distance from the player to the ball |
+
+### Player Physics Sub-struct (`phys = *(DWORD*)(player + 0xD0)`)
+
+| Offset | Type | Description |
+|---|---|---|
+| `phys + 0x00` | `float` | World position X |
+| `phys + 0x04` | `float` | World position Y (height) |
+| `phys + 0x08` | `float` | World position Z/Y (pitch plane) |
+
+### Ball Struct (`ball = *(DWORD*)(base + BALL_GLOBAL_PTR)`)
+
+| Offset | Type | Description |
+|---|---|---|
+| `ball + 0x20` | `float` | World position X |
+| `ball + 0x24` | `float` | World position Y (height) |
+| `ball + 0x28` | `float` | World position Z/Y (pitch plane) |
+| `ball + 0xD0` | `float` | Debug position X |
+| `ball + 0xD4` | `float` | Debug position Y |
+| `ball + 0xD8` | `float` | Debug position Z |
+| `ball + 0x1454` | `float` | Secondary position X |
+| `ball + 0x1458` | `float` | Secondary position Y |
+| `ball + 0x145C` | `float` | Secondary position Z |
+
+### Absolute Addresses
+
+| Symbol | Value | Description |
+|---|---|---|
+| `BALL_MASS_ADDRESS` | `0x00B8AE70` | Absolute address of the ball mass float. Written by `ModState` via `WriteFloat`: `198.0f` when mod is enabled, `188.0f` when disabled. |
+
+<Warning>
+All offsets documented on this page are specific to the **unmodified retail Win32 build** of `pes6.exe`. Any patched, cracked, or differently-versioned executable will have different addresses. Applying this mod to a non-matching binary will cause the byte-validation checks in `InstallContextHook` and `InstallPowerHook` to fail and the hooks will not be installed. Check the `[ERROR]` lines in the log file if the mod does not activate.
+</Warning>

@@ -1,0 +1,346 @@
+---
+title: "PassPowerConfig: Full Configuration Reference"
+sidebarTitle: "Config Reference"
+description: "Complete reference for the PassPowerConfig struct and g_passConfig global — every field, its default value, and how it affects pass power calculation in PES6."
+---
+
+All tuning parameters for the pass power mod live in the `PassPowerConfig` struct defined in `PassPowerConfig.h` and fully initialized in `PassPowerConfig.cpp`. The single global instance, `g_passConfig`, is read at runtime by every path inside `CalculateModifiedEDI`. Because the struct is a plain C aggregate, changing any value and recompiling immediately alters in-game behavior without touching hook, context, or geometry code.
+
+<Tip>
+  Hex values like `0x5800` equal **22528** in decimal. Pass EDI and ball power values operate in the same unsigned 16-bit–range integer space, so converting hex to decimal helps you reason about how close a threshold is to, say, the maximum ball power or the `ediThresholdIgnore` ceiling.
+</Tip>
+
+<Note>
+  `ModState.cpp` also patches the ball's physics mass at address `BALL_MASS_ADDRESS = 0x00B8AE70`. When the mod is **enabled** the mass is written as **198.0f**; when **disabled** it reverts to **188.0f**. This affects how the game's integrator naturally resolves ball velocity and is independent of the EDI boost calculation.
+</Note>
+
+---
+
+## Default Initialization
+
+The complete `g_passConfig` initializer from `PassPowerConfig.cpp`:
+
+```cpp
+PassPowerConfig g_passConfig = {
+    // inertia limits
+    { 2500, 5000, 7250 },
+
+    // lowBoostTable (ZERO, VERY_LOW, LOW_MID, CARRY, HIGH)
+    {
+        { 0, 0, 0, 0, 0 },                                          // dist0_2
+        { 0x0100, 0x0200, 0x0180, 0x0100, 0x0180 },                 // dist3_4
+        { 0x0280, 0x0480, 0x0380, 0x0200, 0x0380 },                 // dist5_6
+        { 0x0700, 0x0B00, 0x0900, 0x0500, 0x0700 }                  // dist7_plus
+    },
+
+    // midBoostTable (ZERO, VERY_LOW, LOW_MID, CARRY, HIGH)
+    {
+        { 0, 0, 0, 0, 0 },                                          // dist0_2
+        { 0, 0, 0, 0, 0 },                                          // dist3_4
+        { 0x0100, 0x0200, 0x0180, 0x0100, 0x0180 },                 // dist5_6
+        { 0x0280, 0x0500, 0x0400, 0x0200, 0x0380 }                  // dist7_plus
+    },
+
+    // bases
+    0x0480, // baseLowBoost
+    0x0180, // baseMidBoost
+
+    // umbrales
+    0x5800, // ediThresholdLow
+    0x6400, // ediThresholdIgnore
+    0x6800, // ediMaxCap
+
+    // No context soft boost
+    { 0x0400, 0x0600, 0x0500, 0x0400, 0x0400 }, // noContextLowBaseBoost
+    0x0180, // noContextMidBaseBoost
+    0x6000, // noContextEdiCap
+
+    // Rescate LOW
+    0x4A00, // rescueLowEdiThreshold
+    5,      // rescueLowDistThreshold
+    0x0400, // rescueLowExtraHighInertia
+    0x0300, // rescueLowExtraOtherInertia
+
+    // Rescate Corto LOW
+    0x3C00, // shortRescueLowEdiThreshold
+    3,      // shortRescueLowDistMin
+    4,      // shortRescueLowDistMax
+    0x0280, // shortRescueLowExtraHighInertia
+    0x0200, // shortRescueLowExtraOtherInertia
+
+    // Pisos blandos
+    0x5100, // softFloorLowDist5_6
+    0x5500, // softFloorLowDist7_plus
+    0x4400, // softFloorLowDist3_4
+
+    // Rescate awkward long
+    0x4600,  // awkwardLongEdiMax
+    6,       // awkwardLongDistMin
+    -0.35f,  // awkwardLongDotMax
+    0x0200,  // awkwardLongExtra
+    0x5200,  // awkwardLongSoftFloor
+
+    // Rescate awkward short/medium
+    0x4000,  // awkwardShortEdiMax
+    3,       // awkwardShortDistMin
+    4,       // awkwardShortDistMax
+    -0.75f,  // awkwardShortDotMax
+    0x0180,  // awkwardShortExtra
+    0x4300,  // awkwardShortSoftFloor
+    0x4300,  // awkwardShortPostEdiMax
+
+    // Awkward short/medium, pero con distancia real larga
+    3400.0f, // awkwardShortRealLongPassDistMin
+    0x4900,  // awkwardShortRealLongSoftFloor
+    0x4A00,  // awkwardShortRealLongPostEdiMax
+
+    // Rescate distSimple subestimada por distancia real
+    4000.0f, // realDistUnderDist34Min
+    0x5000,  // realDistUnderDist34SoftFloor
+    0x5200,  // realDistUnderDist34PostEdiMax
+
+    5200.0f, // realDistUnderDist5Min
+    0x5600,  // realDistUnderDist5SoftFloor
+    0x5A00,  // realDistUnderDist5PostEdiMax
+
+    0x0180   // realDistUnderBoostExtra
+};
+```
+
+---
+
+## Field Reference
+
+### Inertia — `BallInertiaConfig inertia`
+
+These three thresholds define how `ball+0x50` (the ball's current power at hook time) is bucketed into one of five `BallInertiaBand` values. Every boost lookup table is indexed by that band.
+
+<ParamField path="inertia.veryLowLimit" type="DWORD" default="2500">
+  Ball power values from **1 up to and including 2500** are classified as `BALL_VERY_LOW`. A ball with minimal rolling momentum — nearly dead — falls into this band. Boost tables give this band the highest extra boost to compensate for poor energy transfer.
+</ParamField>
+
+<ParamField path="inertia.lowMidLimit" type="DWORD" default="5000">
+  Ball power values from **2501 up to and including 5000** are classified as `BALL_LOW_MID`. This represents a lightly carried ball — a player controlling a slow-rolling pass.
+</ParamField>
+
+<ParamField path="inertia.carryLimit" type="DWORD" default="7250">
+  Ball power values from **5001 up to and including 7250** are classified as `BALL_CARRY`. Values above 7250 are classified as `BALL_HIGH`. The CARRY band represents a moderately energetic ball arriving from a short pass; HIGH represents a fast-moving ball from a long pass or shot rebound.
+</ParamField>
+
+---
+
+### EDI Thresholds
+
+<ParamField path="ediThresholdLow" type="DWORD" default="0x5800 (22528)">
+  Pass EDI values **strictly below** this threshold enter the LOW boost path, receiving `baseLowBoost` plus the `lowBoostTable` extra. Values at or above this threshold but below `ediThresholdIgnore` enter the MID boost path.
+</ParamField>
+
+<ParamField path="ediThresholdIgnore" type="DWORD" default="0x6400 (25600)">
+  Pass EDI values **at or above** this threshold are returned entirely unmodified. The mod never strengthens a pass that the game already considers powerful. The no-context path also exits early at this value.
+</ParamField>
+
+<ParamField path="ediMaxCap" type="DWORD" default="0x6800 (26624)">
+  Hard safety ceiling applied as the very last step. If any combination of boosts pushes EDI above this value, it is clamped here and `boostMode` is set to `0x99` in the debug state. This prevents the mod from accidentally producing super-powered passes.
+</ParamField>
+
+---
+
+### Base Boosts
+
+<ParamField path="baseLowBoost" type="DWORD" default="0x0480 (1152)">
+  Flat amount added to every pass that enters the LOW boost path (EDI < `ediThresholdLow`), before the distance/inertia table extra is applied. Think of this as the unconditional floor lift for underpowered passes.
+</ParamField>
+
+<ParamField path="baseMidBoost" type="DWORD" default="0x0180 (384)">
+  Flat amount added to every pass that enters the MID boost path (`ediThresholdLow` ≤ EDI < `ediThresholdIgnore`). Smaller than `baseLowBoost` because mid-range passes need less correction.
+</ParamField>
+
+---
+
+### No-Context Boosts
+
+These fields govern what happens when a new pass context did **not** arrive with this hook invocation (i.e., `g_lastPowerHadNewCtx == 0`). Without passer/receiver context, distance tables cannot be used.
+
+<ParamField path="noContextLowBaseBoost[5]" type="DWORD[5]" default="{0x0400, 0x0600, 0x0500, 0x0400, 0x0400}">
+  Per-inertia-band boost applied when EDI < `ediThresholdLow` and no new pass context is available. Array index matches `BallInertiaBand`: `[ZERO, VERY_LOW, LOW_MID, CARRY, HIGH]`. `BALL_VERY_LOW` (index 1) receives the largest no-context boost (0x0600) because the ball barely contributes energy.
+</ParamField>
+
+<ParamField path="noContextMidBaseBoost" type="DWORD" default="0x0180 (384)">
+  Flat boost added on the no-context MID path (EDI ≥ `ediThresholdLow`). Not band-indexed; the boost is identical regardless of ball inertia.
+</ParamField>
+
+<ParamField path="noContextEdiCap" type="DWORD" default="0x6000 (24576)">
+  After the no-context boost is applied, the result is clamped to this value. A pass whose original EDI already exceeded this cap is left untouched — the mod never reduces pass power.
+</ParamField>
+
+---
+
+### Low-Pass Rescue
+
+Applied when a long-distance pass arrives with very low EDI, indicating the game has under-powered it.
+
+<ParamField path="rescueLowEdiThreshold" type="DWORD" default="0x4A00 (18944)">
+  Pass EDI must be **strictly below** this value to qualify for the long-distance rescue. Passes with EDI already near 0x5800 don't need a rescue.
+</ParamField>
+
+<ParamField path="rescueLowDistThreshold" type="DWORD" default="5">
+  Minimum `distSimple` value required for rescue. Only passes at distance bracket 5 or higher get this extra boost on top of the normal table extra.
+</ParamField>
+
+<ParamField path="rescueLowExtraHighInertia" type="DWORD" default="0x0400 (1024)">
+  Additional boost added when the rescue fires **and** the ball band is `BALL_HIGH`. A high-inertia ball transfers more energy on a long kick, warranting a larger correction.
+</ParamField>
+
+<ParamField path="rescueLowExtraOtherInertia" type="DWORD" default="0x0300 (768)">
+  Additional boost added when the rescue fires and the ball band is anything **other than** `BALL_HIGH`.
+</ParamField>
+
+---
+
+### Short-Pass Rescue
+
+A second, tighter rescue window for short-to-medium passes that still land with too little power.
+
+<ParamField path="shortRescueLowEdiThreshold" type="DWORD" default="0x3C00 (15360)">
+  Pass EDI must be **strictly below** this value for the short rescue to fire. The threshold is lower than `rescueLowEdiThreshold` — only genuinely weak short passes qualify.
+</ParamField>
+
+<ParamField path="shortRescueLowDistMin" type="DWORD" default="3">
+  Minimum `distSimple` for the short rescue. Very short passes (0–2) are excluded.
+</ParamField>
+
+<ParamField path="shortRescueLowDistMax" type="DWORD" default="4">
+  Maximum `distSimple` for the short rescue. Passes at distance 5 or above are handled by the long rescue instead.
+</ParamField>
+
+<ParamField path="shortRescueLowExtraHighInertia" type="DWORD" default="0x0280 (640)">
+  Extra boost for `BALL_HIGH` on a qualifying short rescue pass.
+</ParamField>
+
+<ParamField path="shortRescueLowExtraOtherInertia" type="DWORD" default="0x0200 (512)">
+  Extra boost for all other inertia bands on a qualifying short rescue pass.
+</ParamField>
+
+---
+
+### Soft Floors
+
+Soft floors nudge EDI halfway toward a target rather than forcing it directly, preserving variation while guaranteeing a minimum feel.
+
+<ParamField path="softFloorLowDist5_6" type="DWORD" default="0x5100 (20736)">
+  Soft-floor target applied after the long rescue fires for `distSimple` 5–6. If EDI is still below this value after the boost, it is moved to `edi + (target - edi) / 2`.
+</ParamField>
+
+<ParamField path="softFloorLowDist7_plus" type="DWORD" default="0x5500 (21760)">
+  Soft-floor target for `distSimple` 7 and above after the long rescue fires. Higher than the 5–6 floor because very long passes merit stronger guarantees.
+</ParamField>
+
+<ParamField path="softFloorLowDist3_4" type="DWORD" default="0x4400 (17408)">
+  Soft-floor target applied after the short rescue fires for `distSimple` 3–4.
+</ParamField>
+
+---
+
+### Awkward Long Rescue
+
+Handles passes where the ball is moving **away** from the direction of the pass (dot product strongly negative) at medium-to-long distance.
+
+<ParamField path="awkwardLongEdiMax" type="DWORD" default="0x4600 (17920)">
+  Original EDI must be **strictly below** this value for the awkward-long rescue to activate.
+</ParamField>
+
+<ParamField path="awkwardLongDistMin" type="DWORD" default="6">
+  Minimum `distSimple` required. Short passes with an awkward ball angle are handled by the awkward-short rescue instead.
+</ParamField>
+
+<ParamField path="awkwardLongDotMax" type="float" default="-0.35f">
+  The geometry dot product (ball direction · pass direction) must be **≤ this value**. A dot of -0.35 means the ball is moving at more than 110° away from the pass target, confirming a genuinely difficult ball situation.
+</ParamField>
+
+<ParamField path="awkwardLongExtra" type="DWORD" default="0x0200 (512)">
+  Flat extra boost added when the awkward-long rescue fires, before the soft floor is applied.
+</ParamField>
+
+<ParamField path="awkwardLongSoftFloor" type="DWORD" default="0x5200 (20992)">
+  Soft-floor target applied after `awkwardLongExtra`. Nudges EDI toward this value without hard-clamping it.
+</ParamField>
+
+---
+
+### Awkward Short Rescue
+
+Handles short-to-medium passes with a very negative dot product — the ball is nearly opposing the kick direction.
+
+<ParamField path="awkwardShortEdiMax" type="DWORD" default="0x4000 (16384)">
+  Original EDI must be **strictly below** this value for the awkward-short rescue to activate.
+</ParamField>
+
+<ParamField path="awkwardShortDistMin" type="DWORD" default="3">
+  Minimum `distSimple` for this rescue path.
+</ParamField>
+
+<ParamField path="awkwardShortDistMax" type="DWORD" default="4">
+  Maximum `distSimple` for this rescue path. Distance 5+ falls under the awkward-long path.
+</ParamField>
+
+<ParamField path="awkwardShortDotMax" type="float" default="-0.75f">
+  Stricter dot threshold than the long rescue. The ball must be moving at more than ~138° away from the pass direction to qualify. This prevents the rescue from firing on merely slightly misaligned passes.
+</ParamField>
+
+<ParamField path="awkwardShortExtra" type="DWORD" default="0x0180 (384)">
+  Flat extra boost added when the awkward-short rescue fires.
+</ParamField>
+
+<ParamField path="awkwardShortSoftFloor" type="DWORD" default="0x4300 (17152)">
+  Soft-floor target for the standard awkward-short case (geometric pass distance below `awkwardShortRealLongPassDistMin`).
+</ParamField>
+
+<ParamField path="awkwardShortPostEdiMax" type="DWORD" default="0x4300 (17152)">
+  Hard cap applied after the awkward-short boost and soft floor. EDI will not exceed this value from this rescue path. Re-applied after `ApplyDistance3To6FineTune` to prevent the fine-tune from overriding the cap.
+</ParamField>
+
+<ParamField path="awkwardShortRealLongPassDistMin" type="float" default="3400.0f">
+  If the geometric pass distance (`geomPassDist`) is at or above this value while `distSimple` is still 3–4, the rescue switches to the "real long" variant with a higher floor and cap.
+</ParamField>
+
+<ParamField path="awkwardShortRealLongSoftFloor" type="DWORD" default="0x4900 (18688)">
+  Soft-floor target used when the awkward-short rescue identifies a geometrically long pass misclassified as short.
+</ParamField>
+
+<ParamField path="awkwardShortRealLongPostEdiMax" type="DWORD" default="0x4A00 (18944)">
+  Hard cap for the real-long variant of the awkward-short rescue.
+</ParamField>
+
+---
+
+### Real Distance Underestimate Rescue
+
+Applied last in the main boost sequence to correct cases where `distSimple` (the game's discrete distance) is too low relative to the actual geometric distance of the pass.
+
+<ParamField path="realDistUnderDist34Min" type="float" default="4000.0f">
+  When `distSimple` is 3–4, `geomPassDist` must be **at or above** this value for the rescue to fire. Prevents corrections on truly short passes that merely happen to share the same discrete bracket.
+</ParamField>
+
+<ParamField path="realDistUnderDist34SoftFloor" type="DWORD" default="0x5000 (20480)">
+  Soft-floor target for the dist 3–4 underestimate case.
+</ParamField>
+
+<ParamField path="realDistUnderDist34PostEdiMax" type="DWORD" default="0x5200 (20992)">
+  Hard cap for the dist 3–4 underestimate rescue. EDI will not exceed this value from this path.
+</ParamField>
+
+<ParamField path="realDistUnderDist5Min" type="float" default="5200.0f">
+  When `distSimple` is exactly 5, `geomPassDist` must be **at or above** this value.
+</ParamField>
+
+<ParamField path="realDistUnderDist5SoftFloor" type="DWORD" default="0x5600 (22016)">
+  Soft-floor target for the dist-5 underestimate case.
+</ParamField>
+
+<ParamField path="realDistUnderDist5PostEdiMax" type="DWORD" default="0x5A00 (23040)">
+  Hard cap for the dist-5 underestimate rescue.
+</ParamField>
+
+<ParamField path="realDistUnderBoostExtra" type="DWORD" default="0x0180 (384)">
+  Small flat boost added before the soft floor in the underestimate rescue. Kept intentionally modest to avoid disrupting the existing balance and is applied uniformly across both the dist 3–4 and dist-5 cases.
+</ParamField>

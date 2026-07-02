@@ -1,0 +1,110 @@
+---
+title: "Logger: File-Append Debug Logging"
+sidebarTitle: "Logger"
+description: "How to enable and read the PES6 mod debug log, with documentation for WriteLog and LogFormat, the metrics logged per pass, and the log file path."
+---
+
+The Logger module writes structured debug output to `D:\pes6_passspeed.log`. Logging is disabled by default (`static const bool ENABLED = false`) to avoid any I/O overhead during normal gameplay. Enable it only when debugging pass behavior or verifying hook installation — every pass power event generates a log entry, which at match pace means hundreds of writes per minute.
+
+## Enabling Logging
+
+<Steps>
+  <Step title="Open Logger.cpp">
+    Find the file at `ab_gameplay_mod/Logger.cpp` in the project.
+  </Step>
+  <Step title="Change the ENABLED flag">
+    Locate the line:
+    ```cpp
+    static const bool ENABLED = false;
+    ```
+    Change it to:
+    ```cpp
+    static const bool ENABLED = true;
+    ```
+  </Step>
+  <Step title="Rebuild the DLL">
+    Recompile the project. The flag is evaluated at compile time — both `WriteLog` and `LogFormat` become no-ops when `ENABLED = false`, so there is zero runtime cost in the default build.
+  </Step>
+</Steps>
+
+<Warning>
+  The log path `D:\pes6_passspeed.log` is hardcoded. The `D:\` drive must exist on the system, or all `CreateFileA` calls will silently fail — no error is raised, and the mod continues running without logging. If you do not have a `D:\` drive, the log will never be created and no output will appear.
+</Warning>
+
+## Functions
+
+### `WriteLog`
+
+```cpp
+void WriteLog(const char* text);
+```
+
+Appends `text` followed by a CRLF (`\r\n`) line ending to `D:\pes6_passspeed.log`. Opens the file on every call using `CreateFileA` with `FILE_APPEND_DATA` and `OPEN_ALWAYS` (creating the file if it does not exist), writes the string and the line terminator using `WriteFile`, then closes the handle. This append-per-call approach avoids keeping a file handle open across game frames.
+
+If `ENABLED = false`, the function returns immediately without any file I/O.
+
+---
+
+### `LogFormat`
+
+```cpp
+void LogFormat(const char* format, ...);
+```
+
+Formats a message using `vsprintf_s` into a 1024-byte stack buffer, then calls `WriteLog` with the result. Accepts a `printf`-style format string and a variadic argument list.
+
+If `ENABLED = false`, the function returns immediately before any formatting work is done.
+
+<Tip>
+  Use a tool like `tail -f D:\pes6_passspeed.log` in a Git Bash or WSL terminal, or open the file in [Process Monitor](https://learn.microsoft.com/en-us/sysinternals/downloads/procmon) with a filter on the log path, to watch entries appear in real time as you play. This lets you observe per-pass EDI values and hook installation results without restarting the game.
+</Tip>
+
+## Log File Path
+
+```
+D:\pes6_passspeed.log
+```
+
+The path is stored as a `static const char*` in `Logger.cpp`:
+
+```cpp
+static const char* LOG_PATH = "D:\\pes6_passspeed.log";
+```
+
+## Example Log Output
+
+The following shows a representative session log based on the actual format strings in `dllmain.cpp` and `PassPower.cpp`:
+
+```
+========================================
+pes6_game_physics_mod.dll cargada.
+Autor: pitycharly
+Version: 1.0
+Descripcion: mod de fisicas de pases desarrollado por pitycharly.
+========================================
+Base del EXE: 0x00400000
+Instalando hook contexto en pes6.exe+1A5905 = 0x005A5905
+[OK] Hook contexto instalado correctamente.
+Instalando hook potencia en pes6.exe+1A637B = 0x005A637B
+g_call_78020  = 0x00478020
+g_powerReturn = 0x005A6386
+[OK] Hook potencia instalado correctamente.
+[OK] Overlay Kitserver activo.
+[OK] Hotkey activo: Ctrl + Shift + P
+[HOTKEY] Thread iniciado. Toggle: Ctrl + Shift + P
+[CTX] passId=1 passer=0x12345678 receiver=0x87654321 p=(32,48) r=(35,50) dist=5
+[PWR] passId=1 pwrHit=1 edi=0x00004200->0x00005480 ball50Before=3200 dist=5 boostMode=0x15 gate=0x23 newCtx=1 ballD0=(0.00,0.00,0.00) ball1454=(12.50,0.10,-3.20) geom=1 dot=-0.312 ballDist=820.5 passDist=4210.3 pBallRaw=1024 rBallRaw=2048 awkwardLong=0
+[HOTKEY] Mod de fisicas DESACTIVADO
+[HOTKEY] Mod de fisicas ACTIVADO
+```
+
+### Log Entry Reference
+
+| Prefix | Source | Description |
+|---|---|---|
+| `[CTX]` | `dllmain.cpp` `LogCurrentContext` | Pass context: passer/receiver addresses, grid positions, discrete distance |
+| `[PWR]` | `dllmain.cpp` monitor loop | Pass power event: original and modified EDI, ball state, boost mode, geometry data |
+| `[HOTKEY]` | `HotkeyToggle.cpp` | Toggle event with new state |
+| `[KSO]` | `KitserverOverlay.cpp` | Kitserver export resolution and overlay status |
+| `[ERROR]` | `MemoryPatch.cpp`, `CheckBytes` | Byte mismatch or `VirtualProtect` failure during hook installation |
+| `[OK]` | `dllmain.cpp` | Successful hook installation or subsystem startup |

@@ -1,0 +1,95 @@
+---
+title: "ModState: Thread-Safe Enable/Disable Toggle"
+sidebarTitle: "ModState"
+description: "How ModState manages the physics mod's on/off state using Win32 Interlocked operations and synchronizes ball mass changes with each state transition."
+---
+
+ModState provides thread-safe global state management for the physics mod's on/off toggle. The mod runs across multiple concurrent threads — the main monitor thread, the hotkey polling thread, and the D3D Present callback invoked by Kitserver — so all reads and writes to the shared state flag use Win32 Interlocked APIs to guarantee atomicity without requiring a critical section.
+
+## Internal State
+
+The module holds a single `volatile LONG` flag:
+
+```cpp
+static volatile LONG g_physicsModEnabled = 1;
+```
+
+The flag starts at `1` (enabled) so the mod is active as soon as the hooks are installed. The secondary gameplay constant used alongside this flag is:
+
+```cpp
+constexpr uintptr_t BALL_MASS_ADDRESS = 0x00B8AE70;
+```
+
+This absolute address in the PES6 process holds the ball mass value. Every state transition writes a new float to this address via `WriteFloat`.
+
+## Functions
+
+### `IsPhysicsModEnabled`
+
+```cpp
+bool IsPhysicsModEnabled();
+```
+
+Reads `g_physicsModEnabled` using `InterlockedCompareExchange(&g_physicsModEnabled, 0, 0)` — a compare-exchange that changes nothing but forces an atomic load with full memory barrier semantics. Returns `true` if the result is non-zero.
+
+This function is called from `CalculateModifiedEDI` on every pass power event. If it returns `false`, the hook immediately returns `ediOriginal` unchanged, restoring vanilla pass behavior without removing the hook from memory.
+
+---
+
+### `SetPhysicsModEnabled`
+
+```cpp
+void SetPhysicsModEnabled(bool enabled);
+```
+
+Writes the new state atomically using `InterlockedExchange`, then calls `ApplyBallMass(enabled)` to synchronize the in-game ball mass with the new toggle state. Called from `MainThread` in `dllmain.cpp` after both hooks are successfully installed, passing `true` to confirm the initial active state.
+
+---
+
+### `TogglePhysicsModEnabled`
+
+```cpp
+bool TogglePhysicsModEnabled();
+```
+
+Reads the current state, computes the inverse (`current ? 0 : 1`), writes it via `InterlockedExchange`, then calls `ApplyBallMass` with the new state. Returns the new enabled state as a `bool` so that `HotkeyToggle` can log the outcome and pass it to `ShowPhysicsModOverlayMessage`.
+
+```cpp
+bool TogglePhysicsModEnabled()
+{
+    LONG current = InterlockedCompareExchange(&g_physicsModEnabled, 0, 0);
+    LONG next = current ? 0 : 1;
+
+    InterlockedExchange(&g_physicsModEnabled, next);
+    ApplyBallMass(next != 0);
+
+    return next != 0;
+}
+```
+
+---
+
+### `ApplyBallMass` (internal)
+
+```cpp
+static void ApplyBallMass(bool enabled)
+{
+    float newMass = enabled ? 198.0f : 188.0f;
+    WriteFloat(BALL_MASS_ADDRESS, newMass);
+}
+```
+
+A private helper called by both `SetPhysicsModEnabled` and `TogglePhysicsModEnabled`. When the mod is active, ball mass is set to `198.0f`; when disabled, it is restored to `188.0f` (the vanilla value). This is a secondary gameplay effect — the mass delta is intentional and part of the physics tuning, not a side-effect to be avoided.
+
+## Ball Mass Adjustment
+
+| State | Value written to `0x00B8AE70` |
+|---|---|
+| Mod **enabled** | `198.0f` |
+| Mod **disabled** | `188.0f` |
+
+The mass difference of 10 units is part of the mod's physics model. Restoring `188.0f` on disable ensures that turning the mod off returns the game precisely to its original simulation parameters, with no residual effect from the mod having been active.
+
+<Note>
+  `CalculateModifiedEDI` in `PassPower.cpp` calls `IsPhysicsModEnabled()` at the top of every invocation. If it returns `false`, the function immediately returns `ediOriginal` and sets `g_lastBoostMode = 0xFE` as a diagnostic sentinel. The hook itself remains installed in memory — the toggle is purely a logic gate, making the disable path non-destructive and instantly reversible without restarting the game.
+</Note>

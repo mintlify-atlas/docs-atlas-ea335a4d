@@ -1,0 +1,136 @@
+---
+title: "Installing PES6 Game Physics Mod"
+sidebarTitle: "Installation"
+description: "Step-by-step instructions for building from source and deploying the mod DLL into PES6 with or without Kitserver."
+---
+
+PES6 Game Physics Mod ships as a Win32 DLL that must be injected into the `pes6.exe` process at launch. There are two supported deployment modes: **Kitserver-integrated**, where `kload.dll` loads the plugin automatically and the in-game overlay is available; and **standalone**, where you supply your own DLL injector or loader and the overlay is unavailable, but all pass-power physics improvements still function identically. Both modes require a DLL built from the same source; only the placement of the output file differs.
+
+## Deployment Options
+
+<Tabs>
+  <Tab title="With Kitserver">
+    When Kitserver is installed, `kload.dll` is loaded into the `pes6.exe` process before any plugin DLL. The mod detects this at runtime by calling `GetModuleHandleA("kload.dll")` and, if found, resolves the overlay exports dynamically — no link-time dependency on Kitserver is required.
+
+    **Step 1 — Build the DLL**
+
+    Open `AB_Gameplay_mod.slnx` in Visual Studio 2022 and build the `pes6_game_physics_mod` project in the **Release | Win32** configuration. The output is:
+
+    ```
+    ab_gameplay_mod\Release\pes6_game_physics_mod.dll
+    ```
+
+    **Step 2 — Place the DLL in Kitserver's plugins folder**
+
+    Copy the built DLL into Kitserver's plugin directory so that `kload.dll` is already resident in the process before the mod initialises:
+
+    ```
+    <PES6 install dir>\
+    └── kitserver\
+        └── plugins\
+            └── pes6_game_physics_mod.dll
+    ```
+
+    **Step 3 — Launch PES6**
+
+    Start the game through Kitserver's launcher as usual. On startup the mod's background thread will:
+
+    1. Resolve `HookFunction`, `UnhookFunction`, `KDrawText`, and `KGetTextExtent` from `kload.dll`.
+    2. Register `ABPhysicsPresent` as a `hk_D3D_Present` callback.
+    3. Install both memory hooks and start the hotkey monitor.
+
+    When Kitserver overlay is active, pressing **Ctrl+Shift+P** displays the status message centred near the top of the screen for 2.2 seconds — green **"FISICAS ACTIVADAS"** or red **"FISICAS DESACTIVADAS"** — drawn at absolute coordinates `x = (640 - textWidth) / 2`, `y = 26`, using Kitserver's internal `KDrawText` scaler.
+
+    If any of the four required exports are missing from `kload.dll`, the mod logs `[KSO][ERROR] Exports faltantes` and continues without the overlay. The physics hooks are unaffected.
+  </Tab>
+
+  <Tab title="Standalone (no Kitserver)">
+    Without Kitserver you need a DLL injector or a custom loader to map the mod DLL into the `pes6.exe` process at startup. The choice of injector is outside the scope of this documentation; any injector that performs a standard `LoadLibrary`-style injection before the first game frame will work.
+
+    **Step 1 — Build the DLL**
+
+    Open `AB_Gameplay_mod.slnx` in Visual Studio 2022 and build the `pes6_game_physics_mod` project in the **Release | Win32** configuration:
+
+    ```
+    ab_gameplay_mod\Release\pes6_game_physics_mod.dll
+    ```
+
+    **Step 2 — Place the DLL and configure your injector**
+
+    Copy the DLL to any accessible location — placing it directly in the PES6 game directory is a common convention:
+
+    ```
+    <PES6 install dir>\
+    └── pes6.exe
+    └── pes6_game_physics_mod.dll
+    ```
+
+    Point your injector at `pes6.exe` and `pes6_game_physics_mod.dll` before launching the game.
+
+    **Step 3 — Launch PES6 via your injector**
+
+    Once injected, `DllMain` is called with `DLL_PROCESS_ATTACH`, which spawns the background thread, installs both hooks, and starts the hotkey monitor. The Kitserver overlay will not appear (since `kload.dll` is absent), but the log will confirm:
+
+    ```text
+    [WARN] Overlay Kitserver no disponible. El toggle funcionara igual por log.
+    [OK] Hotkey activo: Ctrl + Shift + P
+    ```
+
+    The pass-power rescaling, ball mass adjustment, and **Ctrl+Shift+P** runtime toggle all work exactly as in the Kitserver-integrated mode.
+  </Tab>
+</Tabs>
+
+## Visual Studio Project Settings
+
+The project file (`ab_gameplay_mod.vcxproj`) defines four build configurations. The table below summarises the settings as declared in the project file:
+
+| Configuration | Platform | ConfigurationType | PlatformToolset | Optimisation |
+|---|---|---|---|---|
+| Debug | Win32 | DynamicLibrary | v145 | Off (debug libs) |
+| Release | Win32 | DynamicLibrary | v145 | WholeProgramOptimization + IntrinsicFunctions |
+| Debug | x64 | DynamicLibrary | v145 | Off (debug libs) |
+| Release | x64 | DynamicLibrary | v145 | WholeProgramOptimization + IntrinsicFunctions |
+
+Additional compiler settings shared across all configurations:
+
+```xml
+<LanguageStandard>stdcpp20</LanguageStandard>
+<CharacterSet>Unicode</CharacterSet>
+<PrecompiledHeader>Use</PrecompiledHeader>
+<PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+<WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+```
+
+Linker settings (`EnableUAC=false`, `SubSystem=Windows`) are identical for all four configurations.
+
+### Why Win32 for deployment?
+
+Although the project file defines Debug/Release configurations for both `Win32` and `x64`, **Pro Evolution Soccer 6 is a 32-bit process**. You must always inject a **Win32** build of the DLL. The x64 configurations exist for development convenience (e.g. running unit analysis tools) but a 64-bit DLL cannot be loaded into a 32-bit process.
+
+## Enabling the Debug Log
+
+The `Logger.cpp` module writes detailed per-pass telemetry to `D:\pes6_passspeed.log`, but logging is **disabled by default** to avoid disk I/O overhead during normal play:
+
+```cpp
+// Logger.cpp
+static const bool ENABLED = false;   // ← change to true and rebuild
+```
+
+To activate logging:
+
+1. Open `ab_gameplay_mod/Logger.cpp`.
+2. Change `static const bool ENABLED = false;` to `static const bool ENABLED = true;`.
+3. Rebuild the project (Release | Win32 recommended).
+4. Redeploy the updated DLL.
+
+Log output is appended to `D:\pes6_passspeed.log` using `FILE_APPEND_DATA`. Ensure the `D:\` volume exists and is writable, or edit `LOG_PATH` in the same file before rebuilding:
+
+```cpp
+static const char* LOG_PATH = "D:\\pes6_passspeed.log";
+```
+
+When enabled, each pass generates two log lines — one from the Context Hook (`[CTX]`) and one from the Power Hook (`[PWR]`) — containing passer/receiver addresses, grid coordinates, distance, original and modified EDI values, boost mode, ball gate mode, and geometry dot product data.
+
+<Note>
+  The mod starts **enabled by default**. The line `SetPhysicsModEnabled(true)` is called unconditionally in `MainThread` after both hooks are installed, which sets `g_physicsModEnabled = 1` and writes the active ball mass (`198.0f`) to address `0x00B8AE70`. Use **Ctrl+Shift+P** at any time during gameplay to toggle the mod on or off without restarting the game — the toggle is thread-safe and takes effect on the very next pass.
+</Note>

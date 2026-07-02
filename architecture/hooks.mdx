@@ -1,0 +1,230 @@
+---
+title: "How JMP Hook Injection Works in PES6"
+sidebarTitle: "Hook System"
+description: "Deep dive into the JMP hook injection technique used to intercept PES6's physics integrator: byte validation, relative JMP patching, and safe restoration of original calls."
+---
+
+The mod uses a classic x86 trampoline technique: the installer overwrites a small run of original bytes at a known offset inside `pes6.exe` with a single relative `JMP` instruction (`0xE9` + rel32), redirecting execution into a naked C function. That function saves any registers it needs, runs additional C logic, re-executes the original instructions that were displaced by the patch, and finally jumps back to the instruction immediately following the patched region. This design means no original game logic is permanently lost — the hook merely wraps it.
+
+<Warning>
+  All byte offsets and expected byte sequences documented here are specific to the **unmodified retail PES6 binary**. If the executable has been patched, re-packed, or differs in version, `CheckBytes` will detect the mismatch and abort installation before writing a single byte.
+</Warning>
+
+## Hook A — Context Hook at `pes6.exe+1A5905`
+
+### What is hooked and why
+
+At offset `0x1A5905` the game calls an internal function and moves the return value into `EBX`. At this exact call site the CPU registers hold the identities of the two players involved in the pass event:
+
+- `ESI` = passer (pointer to the passer's in-memory player structure)
+- `EDX` = receiver (pointer to the receiver's in-memory player structure)
+
+By hooking here, the mod can capture both pointers before any other pass logic runs.
+
+### Original bytes (7 bytes)
+
+```
+E8 66 BC FF FF   ; call pes6.exe+1A1570
+8B D8            ; mov ebx, eax
+```
+
+The hook replaces all 7 bytes. The first 5 become the `JMP` to `Hook_Context_1A5905`; the remaining 2 become `NOP` padding.
+
+### Naked assembly — `Hook_Context_1A5905`
+
+```c
+extern "C" __declspec(naked) void Hook_Context_1A5905()
+{
+    __asm
+    {
+        // Save pass context
+        // ESI = passer / player near the ball
+        // EDX = receiver / pass destination
+        mov dword ptr[g_savedPasser],   esi
+        mov dword ptr[g_savedReceiver], edx
+        inc dword ptr[g_ctxCount]
+
+        // Optional geometry log — does not alter game state
+        pushfd
+        pushad
+        mov  eax, dword ptr[g_ctxCount]
+        push eax        // count
+        push edx        // receiver
+        push esi        // passer
+        call LogPassGeometryOnly
+        add  esp, 0Ch
+        popad
+        popfd
+
+        // Re-execute displaced instructions
+        call dword ptr[g_call_1A1570]   // original call pes6.exe+1A1570
+        mov  ebx, eax                   // original mov ebx, eax
+
+        // Return to pes6.exe+1A590C
+        jmp dword ptr[g_ctxReturn]
+    }
+}
+```
+
+### Key addresses
+
+| Symbol | Value | Description |
+|---|---|---|
+| Hook site | `base + 0x1A5905` | Where the JMP is written |
+| `g_call_1A1570` | `base + 0x1A1570` | The original call target, re-executed inside the hook |
+| `g_ctxReturn` | `base + 0x1A590C` | Return address (byte immediately after the 7-byte patch) |
+
+---
+
+## Hook B — Power Hook at `pes6.exe+1A637B`
+
+### What is hooked and why
+
+At offset `0x1A637B` the game prepares a call to its internal ball-writing routine (`pes6.exe+78020`). Immediately before this call the `EDI` register holds the computed pass power value that will be written into `ball+0x50`. Intercepting here gives the mod the opportunity to read and modify EDI before the value is committed to the ball structure.
+
+### Original bytes (11 bytes)
+
+```
+6A 00   ; push 00
+55      ; push ebp
+57      ; push edi
+50      ; push eax
+56      ; push esi
+E8 9A 1C ED FF  ; call pes6.exe+78020
+```
+
+All 11 bytes are replaced. The first 5 become the `JMP`; bytes 5–10 become `NOP` padding.
+
+### Naked assembly — `Hook_Power_1A637B`
+
+```c
+extern "C" __declspec(naked) void Hook_Power_1A637B()
+{
+    __asm
+    {
+        // Preserve original EDI for restoration after the call
+        mov dword ptr[g_savedEDIForRestore], edi
+
+        // Save caller-saved registers
+        push eax
+        push ebx
+        push ecx
+        push edx
+
+        // Call CalculateModifiedEDI(DWORD ediOriginal) via __cdecl
+        push edi
+        call CalculateModifiedEDI
+        add  esp, 4
+
+        // Stash modified value
+        mov dword ptr[g_runtimeModifiedEDI], eax
+
+        // Restore registers
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
+
+        // Load modified EDI for the original call
+        mov edi, dword ptr[g_runtimeModifiedEDI]
+
+        // Re-execute displaced instructions with modified EDI
+        push 00
+        push ebp
+        push edi
+        push eax
+        push esi
+        call dword ptr[g_call_78020]
+
+        // Restore original EDI so surrounding code is unaffected
+        mov edi, dword ptr[g_savedEDIForRestore]
+
+        // Return to pes6.exe+1A6386
+        jmp dword ptr[g_powerReturn]
+    }
+}
+```
+
+### Key addresses
+
+| Symbol | Value | Description |
+|---|---|---|
+| Hook site | `base + 0x1A637B` | Where the JMP is written |
+| `g_call_78020` | `base + 0x78020` | Ball-writing routine; receives pass power via EDI on the stack |
+| `g_powerReturn` | `base + 0x1A6386` | Return address (byte immediately after the 11-byte patch) |
+
+<Note>
+  `g_savedEDIForRestore` ensures that EDI is restored to its original value after `call_78020` completes. Only the value actually pushed onto the stack — and therefore written into the ball — is the modified one. The rest of the surrounding PES6 code sees an unchanged EDI.
+</Note>
+
+---
+
+## Safety checks — `CheckBytes` and conditional installation
+
+Before either `WriteJump` call is made, the installer reads the bytes at the target address and compares them byte-for-byte against the known original sequence.
+
+```c
+bool InstallContextHook(uintptr_t pesBase)
+{
+    uintptr_t hookAddress = pesBase + PesAddresses::PASS_CONTEXT_HOOK;
+
+    const unsigned char expected[] =
+    {
+        0xE8, 0x66, 0xBC, 0xFF, 0xFF, 0x8B, 0xD8  // call +1A1570 / mov ebx,eax
+    };
+
+    if (!CheckBytes(hookAddress, expected, sizeof(expected)))
+    {
+        WriteLog("[ERROR] No se instala hook contexto: bytes no coinciden.");
+        return false;   // <-- nothing is written
+    }
+
+    // ... set up globals, then WriteJump ...
+}
+```
+
+`CheckBytes` wraps the read in a structured-exception handler. If an access violation occurs (e.g., the address is not mapped), it logs the failure and returns `false`. If any single byte differs from the expected value, it logs the index, expected value, and actual value, then returns `false`. Only a perfect match proceeds to `WriteJump`.
+
+The same pattern applies in `InstallPowerHook` for the 11-byte sequence at `+1A637B`. If either installer returns `false`, `MainThread` logs the error and exits without activating the mod.
+
+---
+
+## `WriteJump` implementation
+
+```c
+bool WriteJump(uintptr_t source, void* destination, size_t length)
+{
+    if (length < 5)
+        return false;
+
+    DWORD oldProtect = 0;
+
+    // Make the target region writable
+    VirtualProtect((void*)source, length, PAGE_EXECUTE_READWRITE, &oldProtect);
+
+    uintptr_t src = source;
+    uintptr_t dst = (uintptr_t)destination;
+
+    // rel32 = destination - source - 5 (size of JMP instruction)
+    int32_t relative = (int32_t)(dst - src - 5);
+
+    unsigned char* p = (unsigned char*)source;
+    p[0] = 0xE9;                    // JMP rel32 opcode
+    *(int32_t*)(p + 1) = relative;  // 32-bit signed relative offset
+
+    // Pad remaining bytes with NOPs so no partial instruction is left
+    for (size_t i = 5; i < length; i++)
+        p[i] = 0x90;
+
+    // Ensure CPU instruction cache reflects the new bytes
+    FlushInstructionCache(GetCurrentProcess(), (void*)source, length);
+
+    // Restore original page protection
+    DWORD temp = 0;
+    VirtualProtect((void*)source, length, oldProtect, &temp);
+
+    return true;
+}
+```
+
+The relative offset formula `dst - src - 5` accounts for the fact that the CPU reads the JMP's target relative to the address of the **next** instruction (i.e., `source + 5`). The NOP padding is essential for Hook B where 11 bytes are patched but a JMP only consumes 5 — without it, the 6 leftover bytes would be interpreted as stale partial instructions if execution ever fell through (it never does, but the padding is correct practice). `FlushInstructionCache` is called with the exact patched range to invalidate any pre-fetched instructions on all logical CPU cores.

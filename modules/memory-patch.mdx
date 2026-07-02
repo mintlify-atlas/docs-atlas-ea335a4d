@@ -1,0 +1,124 @@
+---
+title: "MemoryPatch: Safe x86 JMP Hook Utilities"
+sidebarTitle: "MemoryPatch"
+description: "API reference for CheckBytes, WriteJump, and WriteFloat — the low-level Win32 memory patching utilities that validate and inject hooks into the PES6 process."
+---
+
+MemoryPatch provides three utility functions used by `InstallContextHook` and `InstallPowerHook`. All operations are guarded with `VirtualProtect` to temporarily make target memory writable before writing, and the original page protection is restored immediately after each operation completes.
+
+## Functions
+
+### `CheckBytes`
+
+```cpp
+bool CheckBytes(uintptr_t address, const unsigned char* expected, size_t count);
+```
+
+Reads `count` bytes starting at `address` and compares them byte-by-byte against the `expected` array. Returns `true` only if every byte matches exactly.
+
+If any byte differs, `LogFormat` records the address, byte index, expected value, and actual value before returning `false`. The entire body runs inside a Win32 SEH `__try/__except` block — if the target address is not mapped or is otherwise unreadable, the exception is caught, an error is logged, and the function returns `false` safely.
+
+**You must call `CheckBytes` before `WriteJump`** to confirm the binary version of `pes6.exe` contains the byte sequence the hook was written against. A mismatch means the game has been patched or a different version is running, and writing a jump to an unvalidated address would corrupt the process.
+
+<Warning>
+  `CheckBytes` is a read-only safety gate. It does not modify memory. Always call it with the expected byte pattern before any `WriteJump` call. Skipping this step risks writing a hook into the wrong instruction boundary, which will crash or corrupt the game immediately.
+</Warning>
+
+---
+
+### `WriteJump`
+
+```cpp
+bool WriteJump(uintptr_t source, void* destination, size_t length);
+```
+
+Writes an x86 near JMP (`0xE9` + 4-byte relative offset) at `source` that redirects execution to `destination`. Any bytes from offset 5 through `length - 1` are filled with `0x90` (NOP) to safely consume the remainder of the original instruction sequence.
+
+**Parameters**
+
+<ParamField path="source" type="uintptr_t" required>
+  The absolute virtual address in the PES6 process where the JMP will be written. Must point to the first byte of the instruction sequence being replaced.
+</ParamField>
+
+<ParamField path="destination" type="void*" required>
+  The address of the hook function (`Hook_Context_1A5905` or `Hook_Power_1A637B`). The 4-byte relative offset is calculated as `(uintptr_t)destination - source - 5`.
+</ParamField>
+
+<ParamField path="length" type="size_t" required>
+  Total number of bytes to overwrite at `source`. Must be `>= 5`. The context hook passes `7`; the power hook passes `11`.
+</ParamField>
+
+**Return value:** `false` if `length < 5` or if `VirtualProtect` fails; `true` on success.
+
+**Implementation:**
+
+```cpp
+bool WriteJump(uintptr_t source, void* destination, size_t length)
+{
+    if (length < 5)
+    {
+        return false;
+    }
+
+    DWORD oldProtect = 0;
+
+    if (!VirtualProtect((void*)source, length, PAGE_EXECUTE_READWRITE, &oldProtect))
+    {
+        LogFormat("[ERROR] VirtualProtect fallo en 0x%08X", (unsigned int)source);
+        return false;
+    }
+
+    uintptr_t src = source;
+    uintptr_t dst = (uintptr_t)destination;
+    int32_t relative = (int32_t)(dst - src - 5);
+
+    unsigned char* p = (unsigned char*)source;
+
+    p[0] = 0xE9; // JMP rel32
+    *(int32_t*)(p + 1) = relative;
+
+    for (size_t i = 5; i < length; i++)
+    {
+        p[i] = 0x90; // NOP
+    }
+
+    FlushInstructionCache(GetCurrentProcess(), (void*)source, length);
+
+    DWORD temp = 0;
+    VirtualProtect((void*)source, length, oldProtect, &temp);
+
+    return true;
+}
+```
+
+After writing, `FlushInstructionCache` is called for the patched region to ensure the CPU instruction pipeline does not retain stale pre-decoded instructions.
+
+<Warning>
+  `WriteJump` permanently modifies the live PES6 process. The original bytes are **not** saved and cannot be restored by this function. Always call `CheckBytes` first to confirm you are patching the expected instruction sequence.
+</Warning>
+
+<Note>
+  NOP padding is critical when the target instruction sequence is longer than 5 bytes. The context hook (`InstallContextHook`) replaces a 7-byte sequence, leaving 2 NOP bytes after the JMP. The power hook (`InstallPowerHook`) replaces an 11-byte sequence, leaving 6 NOP bytes. Without padding, partial bytes from the old instructions would be interpreted as new opcodes when control falls through from an unexpected path.
+</Note>
+
+---
+
+### `WriteFloat`
+
+```cpp
+bool WriteFloat(uintptr_t address, float value);
+```
+
+Writes a 4-byte IEEE 754 float to `address` using `VirtualProtect` to temporarily unlock the page. Used by `ModState` to patch the ball mass value at the hardcoded address `BALL_MASS_ADDRESS = 0x00B8AE70`.
+
+**Parameters**
+
+<ParamField path="address" type="uintptr_t" required>
+  The absolute virtual address to write to. For ball mass, this is `0x00B8AE70`.
+</ParamField>
+
+<ParamField path="value" type="float" required>
+  The float value to write. ModState writes `198.0f` when the mod is enabled and `188.0f` when disabled.
+</ParamField>
+
+**Return value:** `false` if `VirtualProtect` fails; `true` on success.

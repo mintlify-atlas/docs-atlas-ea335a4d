@@ -1,0 +1,233 @@
+---
+title: "PassPower: EDI Interception and Rescaling Logic"
+sidebarTitle: "Pass Power"
+description: "How CalculateModifiedEDI rescales the raw pass power value using inertia classification, distance-based boost tables, soft floors, and geometric awkward-angle rescue."
+---
+
+PassPower is the core computation module of the mod. Every time PES6 calculates pass power and stores it in the `EDI` register at `pes6.exe+1A637B`, Hook B intercepts the value before it is committed to the ball. `CalculateModifiedEDI` then takes the raw `ediOriginal`, classifies the game situation across multiple dimensions (mod state, pass strength, ball inertia, context freshness, grid distance, and spatial geometry), selects an appropriate boost path, and returns a corrected value. The hook applies that value as EDI for the original `call_78020` invocation, so the ball receives the rescaled power rather than the vanilla one.
+
+<Note>
+  The mod **never reduces EDI below `ediOriginal`**. Every code path in `CalculateModifiedEDI` either returns `ediOriginal` unchanged or adds a positive amount. The final global cap (`ediMaxCap = 0x6800`) is the only ceiling.
+</Note>
+
+## `CalculateModifiedEDI` — step-by-step
+
+```c
+extern "C" __declspec(noinline) DWORD __cdecl CalculateModifiedEDI(DWORD ediOriginal)
+```
+
+<Steps>
+  <Step title="Increment counter and reset diagnostics">
+    `g_powerCount` is incremented so the monitor thread can detect a new power event. All diagnostic globals (`g_lastBoostMode`, `g_lastDistSimple`, geometry bits, etc.) are reset to zero to avoid stale data appearing in the log.
+  </Step>
+  <Step title="Detect context freshness">
+    ```c
+    if (ctxCount != g_prevPowerCtxCount) {
+        g_lastPowerHadNewCtx = 1;
+        g_prevPowerCtxCount  = ctxCount;
+    } else {
+        g_lastPowerHadNewCtx = 0;
+    }
+    ```
+    If `g_ctxCount` (written by Hook A) has advanced since the last power event, the power hit is considered to have a **fresh context** — the saved passer/receiver pointers correspond to this specific pass. If the context count has not changed, the power hook is firing for a pass that did not trigger Hook A (e.g., a repeated or synthetic power calculation), and a different boost path is used.
+  </Step>
+  <Step title="Early exit — mod disabled">
+    ```c
+    if (!IsPhysicsModEnabled()) {
+        g_lastBoostMode    = 0xFE;
+        g_lastBallGateMode = 0xFE;
+        return ediOriginal;
+    }
+    ```
+    The hook remains installed at all times. When the mod is toggled off via Ctrl+Shift+P, `CalculateModifiedEDI` returns `ediOriginal` immediately without any modification. `boostMode 0xFE` signals this in the log.
+  </Step>
+  <Step title="Early exit — strong pass threshold">
+    ```c
+    if (ediOriginal >= g_passConfig.ediThresholdIgnore)  // 0x6400
+    {
+        g_lastBoostMode = 0x00;
+        return ediOriginal;
+    }
+    ```
+    Passes with a raw EDI at or above `0x6400` are already strong; boosting them further would make long passes unrealistically powerful. These are returned unchanged with `boostMode 0x00`.
+  </Step>
+  <Step title="Read ball inertia (ball+0x50 before call_78020)">
+    ```c
+    DWORD ball50Before = ReadBall50Before();
+    // ballBase = *(DWORD*)(g_base + PesAddresses::BALL_GLOBAL_PTR)
+    // value    = *(DWORD*)(ballBase + PesOffsets::BALL_POWER)  // +0x50
+    ```
+    `ball+0x50` holds the ball's current power/inertia state **before** the original `call_78020` overwrites it. This value is classified into an inertia band that shifts all subsequent boost amounts.
+  </Step>
+  <Step title="Classify ball inertia band">
+    ```c
+    BallInertiaBand GetBallInertiaBand(DWORD ball50Before)
+    {
+        if (ball50Before == 0)                             return BALL_ZERO;
+        if (ball50Before <= g_passConfig.inertia.veryLowLimit) return BALL_VERY_LOW;
+        if (ball50Before <= g_passConfig.inertia.lowMidLimit)  return BALL_LOW_MID;
+        if (ball50Before <= g_passConfig.inertia.carryLimit)   return BALL_CARRY;
+        return BALL_HIGH;
+    }
+    ```
+    The five bands (`BALL_ZERO`, `BALL_VERY_LOW`, `BALL_LOW_MID`, `BALL_CARRY`, `BALL_HIGH`) are used as array indices into the `DistanceBoostTable` lookup tables and the `noContextLowBaseBoost` array.
+  </Step>
+  <Step title="No-context path — ApplyNoContextBoost">
+    If `g_lastPowerHadNewCtx == 0`, there is no passer/receiver information available. The boost is a flat, band-indexed amount rather than a distance-aware one:
+
+    ```c
+    DWORD ApplyNoContextBoost(DWORD ediOriginal, BallInertiaBand band)
+    {
+        if (edi < g_passConfig.ediThresholdLow) {           // LOW range
+            edi += g_passConfig.noContextLowBaseBoost[band]; // boostMode 0x41
+        } else {                                             // MID range
+            edi += g_passConfig.noContextMidBaseBoost;       // boostMode 0x42
+        }
+        if (edi > g_passConfig.noContextEdiCap)             // cap at 0x6000
+            edi = g_passConfig.noContextEdiCap;
+        return edi;
+    }
+    ```
+
+    The cap (`noContextEdiCap = 0x6000`) is lower than the main `ediMaxCap` to keep no-context boosts conservative. The function also guards against accidentally reducing an `ediOriginal` that already exceeds the cap.
+  </Step>
+  <Step title="Read distance and geometry (new-context path)">
+    With a fresh context, `ReadPassContextDistance` provides `distSimple` (Manhattan grid distance), and `ReadPassGeometryDot` provides `geomDot`, `geomBallDist`, `geomPassDist`, and the raw player-ball proximity values. Both calls are guarded — if either fails, the corresponding data is treated as zero/unavailable.
+  </Step>
+  <Step title="Evaluate awkward-angle candidates">
+    Before the main boost is applied, two boolean flags are computed:
+
+    ```c
+    bool awkwardLongCandidate =
+        hasGeom                                              &&
+        distSimple >= (int)g_passConfig.awkwardLongDistMin  &&
+        ediOriginal <      g_passConfig.awkwardLongEdiMax   &&  // 0x4600
+        geomDot    <=      g_passConfig.awkwardLongDotMax;      // -0.35f
+
+    bool awkwardShortCandidate =
+        hasGeom                                               &&
+        distSimple >= (int)g_passConfig.awkwardShortDistMin  &&  // 3
+        distSimple <= (int)g_passConfig.awkwardShortDistMax  &&  // 4
+        ediOriginal <      g_passConfig.awkwardShortEdiMax   &&  // 0x4000
+        geomDot    <=      g_passConfig.awkwardShortDotMax;      // -0.75f
+    ```
+
+    These flags gate the rescue sub-paths applied later inside the LOW range block.
+  </Step>
+  <Step title="Apply LOW path (edi < ediThresholdLow = 0x5800)">
+    ```c
+    edi += g_passConfig.baseLowBoost;
+    DWORD extra = GetLowDistanceExtra(distSimple, ballBand);
+    // extra = lowBoostTable.dist0_2[band]  for dist 0–2
+    //       = lowBoostTable.dist3_4[band]  for dist 3–4
+    //       = lowBoostTable.dist5_6[band]  for dist 5–6
+    //       = lowBoostTable.dist7_plus[band] for dist 7+
+    ```
+
+    After the base and distance extra are added, rescue sub-paths run:
+
+    - **Long rescue** (`rescueLowEdiThreshold`, `rescueLowDistThreshold`): if `ediOriginal` is very low and `distSimple` is large, adds `rescueLowExtraHighInertia` or `rescueLowExtraOtherInertia` depending on band.
+    - **Short rescue** (`shortRescueLowEdiThreshold`, `shortRescueLowDistMin`–`shortRescueLowDistMax`): similar pattern for medium-short distances.
+    - Soft floors are applied after the extra: `softFloorLowDist7_plus`, `softFloorLowDist5_6`, `softFloorLowDist3_4`.
+    - **Awkward long rescue**: if `awkwardLongCandidate`, adds `awkwardLongExtra` and applies `ApplySoftFloor(edi, awkwardLongSoftFloor)`.
+    - **Awkward short rescue**: if `awkwardShortCandidate`, adds `awkwardShortExtra`, applies soft floor, and caps at `awkwardShortPostEdiMax` (or `awkwardShortRealLongPostEdiMax` if `geomPassDist >= awkwardShortRealLongPassDistMin`).
+  </Step>
+  <Step title="Apply MID path (edi >= ediThresholdLow)">
+    ```c
+    edi += g_passConfig.baseMidBoost;
+    DWORD extra = GetMidDistanceExtra(distSimple, ballBand);
+    // Same distance bucketing as the LOW table but with mid-range values
+    edi += extra;
+    ```
+
+    No rescue sub-paths run in the MID range; the base + distance table boost is the complete adjustment.
+  </Step>
+  <Step title="Apply distance 3–6 fine-tune (+5%)">
+    ```c
+    DWORD ApplyDistance3To6FineTune(DWORD ediOriginal, DWORD edi, int distSimple)
+    {
+        if (distSimple < 3 || distSimple > 6) return edi;
+        if (edi <= ediOriginal)               return edi;  // no boost was applied
+        DWORD boostApplied = edi - ediOriginal;
+        DWORD extra = boostApplied / 20;  // 5%, rounded down
+        return edi + extra;
+    }
+    ```
+
+    This adds a small proportional bonus for the middle-distance range (3–6 grid units) without affecting very short or very long passes. It only fires if a positive boost was already applied.
+  </Step>
+  <Step title="Apply real-distance underestimate rescue">
+    ```c
+    DWORD ApplyRealDistanceUnderestimateRescue(
+        DWORD ediOriginal, DWORD edi, int distSimple,
+        bool hasGeom, float geomPassDist, bool* outApplied)
+    ```
+
+    For `distSimple` 3–5, if `geomPassDist` exceeds a configured threshold (indicating the discrete grid distance underestimated how far the pass actually is), the function applies a small fixed extra plus a soft-floor push, capped at a per-range `postEdiMax`. This path is skipped if the result is already strong enough (`edi >= postCap`), if geometry is unavailable, or if `ediOriginal` is above `ediThresholdIgnore`. Sets `boostMode 0x1C` when applied.
+  </Step>
+  <Step title="Final cap">
+    ```c
+    if (edi > g_passConfig.ediMaxCap)  // 0x6800
+    {
+        edi = g_passConfig.ediMaxCap;
+        g_lastBoostMode = 0x99;
+    }
+    g_lastEDIModified = edi;
+    return edi;
+    ```
+
+    `ediMaxCap` (0x6800) is a hard ceiling above which no pass power is allowed regardless of which path ran. Hitting the cap sets `boostMode 0x99` in the log.
+  </Step>
+</Steps>
+
+---
+
+## `ApplySoftFloor`
+
+```c
+static DWORD ApplySoftFloor(DWORD edi, DWORD target)
+{
+    if (edi >= target) return edi;
+    return edi + ((target - edi) / 2);
+}
+```
+
+A soft floor moves the value **halfway toward `target`** without hard-setting it. This means repeated applications would converge to `target` asymptotically, but since it is applied once per pass, it acts as a gentle push: if `edi` is far below `target` the boost is substantial; if it is already close to `target` the boost is small. It never overshoots `target`, and it never reduces `edi` (the `edi >= target` guard ensures that).
+
+---
+
+## Boost mode reference (`g_lastBoostMode`)
+
+| Value | Meaning |
+|---|---|
+| `0x00` | No change applied (strong pass or mod off) |
+| `0x10` | LOW path, dist 0–2, standard |
+| `0x12` | LOW path, dist 3–4 |
+| `0x13` | LOW path, dist 7+ |
+| `0x15` | LOW path, dist 5–6 |
+| `0x17` | LOW path, short rescue applied |
+| `0x18` | LOW path, long rescue applied |
+| `0x19` | LOW path, soft floor applied |
+| `0x1A` | LOW path, awkward long rescue applied |
+| `0x1B` | LOW path, awkward short rescue applied |
+| `0x1C` | Real-distance underestimate rescue applied |
+| `0x20` | MID path, dist 0–4 |
+| `0x23` | MID path, dist 7+ |
+| `0x25` | MID path, dist 5–6 |
+| `0x41` | No-context, LOW range |
+| `0x42` | No-context, MID range |
+| `0x99` | Final `ediMaxCap` (0x6800) hit |
+| `0xFE` | Mod disabled — vanilla pass |
+
+---
+
+## Awkward-angle rescue summary
+
+Two rescue paths handle passes where the ball is on the wrong side of the passer relative to the intended direction.
+
+| Candidate | `distSimple` | `ediOriginal` | `geomDot` | Action |
+|---|---|---|---|---|
+| `awkwardLongCandidate` | `>= awkwardLongDistMin` (6) | `< 0x4600` | `<= -0.35f` | Adds `awkwardLongExtra`, applies soft floor toward `awkwardLongSoftFloor` |
+| `awkwardShortCandidate` | 3–4 | `< 0x4000` | `<= -0.75f` | Adds `awkwardShortExtra`, applies soft floor, caps at `awkwardShortPostEdiMax` (or `awkwardShortRealLongPostEdiMax` when `geomPassDist >= awkwardShortRealLongPassDistMin`) |
+
+Both candidates require `hasGeom == true` — if `ReadPassGeometryDot` failed (e.g., ball pointer invalid), neither rescue fires and the standard boost path is used.

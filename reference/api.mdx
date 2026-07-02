@@ -1,0 +1,240 @@
+---
+title: "PES6 Game Physics Mod — Full Function Reference"
+sidebarTitle: "API Reference"
+description: "Complete function reference for all public C/C++ functions across PassContext, PassPower, MemoryPatch, ModState, HotkeyToggle, KitserverOverlay, and Logger modules."
+---
+
+This page documents every public function exported or declared in header files across the mod's modules. All functions use standard Win32/C++ calling conventions unless noted as `__cdecl` or `__declspec(naked)`. The two trampoline hooks (`Hook_Context_1A5905` and `Hook_Power_1A637B`) are `__declspec(naked)` and must not be called directly from C++ code — they are installed into the game's code section via `WriteJump`.
+
+---
+
+## PassContext
+
+Declared in `PassContext.h`. Manages Hook A at `pes6.exe+0x1A5905`, which intercepts the pass-initiation call to capture the passer and receiver pointers for use by the power-scaling logic.
+
+### `bool InstallContextHook(uintptr_t pesBase)`
+
+Installs Hook A at `PASS_CONTEXT_HOOK` (`pesBase + 0x1A5905`). Before patching, validates that the 7 bytes at the target address match the expected sequence (`E8 66 BC FF FF 8B D8`). On success, stores `g_call_1A1570` and `g_ctxReturn` for use inside the trampoline, then calls `WriteJump` to redirect execution to `Hook_Context_1A5905`.
+
+Returns `false` and logs `[ERROR]` if byte validation fails or if `WriteJump` cannot write the patch.
+
+### `DWORD GetContextCount()`
+
+Returns the total number of pass context captures (`g_ctxCount`) since the DLL was loaded. Incremented on every Hook A invocation. Used by the power hook to detect whether a new pass context arrived between two consecutive power-hook calls (`g_lastPowerHadNewCtx`).
+
+### `DWORD GetSavedPasser()`
+
+Returns the passer pointer (ESI value) saved by the most recent Hook A invocation.
+
+### `DWORD GetSavedReceiver()`
+
+Returns the receiver pointer (EDX value) saved by the most recent Hook A invocation.
+
+### `bool ReadPassContextDistance(DWORD passer, DWORD receiver, BYTE* passerX, BYTE* passerY, BYTE* receiverX, BYTE* receiverY, int* distSimple)`
+
+Reads the discrete cell coordinates from both player structs at offsets `+0x204` (X) and `+0x205` (Y). Computes the Manhattan distance:
+
+```cpp
+distSimple = abs(receiverX - passerX) + abs(receiverY - passerY);
+```
+
+All memory reads are SEH-guarded. Returns `false` if either pointer is null or if a structured exception occurs. On failure, no output parameters are modified.
+
+### `bool ReadPassGeometryDot(DWORD passer, DWORD receiver, float* outDot, float* outBallDist, float* outPassDist, DWORD* outPasserBallDistRaw, DWORD* outReceiverBallDistRaw)`
+
+Reads 3D world positions for both players (via logic position at `player+0xE0/E4/E8`) and the ball (via `BALL_GLOBAL_PTR` → `ball+0x20/24/28`). Computes the 2D (XZ-plane) normalized dot product between the pass vector (passer → receiver) and the ball-relative vector (passer → ball). A negative dot product means the ball is on the opposite side from the receiver — useful for detecting awkward passes.
+
+Returns `false` if the ball pointer is null, if either player's logic position cannot be read, or if the pass/ball vector lengths are below 1.0 units (degenerate geometry).
+
+<Note>
+The physics sub-struct path (`player+0xD0` → `phys+0x00/04/08`) is also read in `PassContext.cpp` for comparative logging via `LogPassGeometryOnly`, but `ReadPassGeometryDot` uses the logic-position path (`player+0xE0/E4/E8`) as the primary source since it proved more reliable in Cheat Engine testing.
+</Note>
+
+---
+
+## PassPower
+
+Declared in `PassPower.h`. Manages Hook B at `pes6.exe+0x1A637B`, which intercepts the call that writes pass power into the ball's physics state. Contains the core rescaling logic in `CalculateModifiedEDI`.
+
+### `bool InstallPowerHook(uintptr_t pesBase)`
+
+Installs Hook B at `PASS_POWER_HOOK` (`pesBase + 0x1A637B`). Validates 11 bytes (`6A 00 55 57 50 56 E8 9A 1C ED FF`) before patching. On success, stores `g_call_78020` and `g_powerReturn`, then calls `WriteJump` with length 11 to redirect execution to `Hook_Power_1A637B`.
+
+Returns `false` and logs `[ERROR]` if byte validation fails or if `WriteJump` cannot write the patch.
+
+### `DWORD GetPowerCount()`
+
+Returns the total number of EDI interceptions (`g_powerCount`) since DLL load. Incremented at the top of `CalculateModifiedEDI` on every Hook B invocation.
+
+### `DWORD GetLastEDIOriginal()`
+
+Returns the raw EDI value passed into `CalculateModifiedEDI` on the last Hook B invocation — the unmodified pass power as computed by the game engine.
+
+### `DWORD GetLastEDIModified()`
+
+Returns the EDI value returned by `CalculateModifiedEDI` on the last invocation — the rescaled pass power actually written to the ball physics state.
+
+### `DWORD GetLastBall50Before()`
+
+Returns the value of `ball+0x50` read immediately before `CALL_78020` is invoked. Captures the ball's inertia state from the previous pass, used for `BallInertiaBand` classification.
+
+### `DWORD GetLastDistSimple()`
+
+Returns the Manhattan cell distance (`distSimple`) calculated during the last power hook invocation.
+
+### `DWORD GetLastBoostMode()`
+
+Returns the boost path identifier from the last `CalculateModifiedEDI` call. See the [Boost Mode Code Table](#boost-mode-code-table) below for all possible values.
+
+### `DWORD GetLastBallGateMode()`
+
+Returns a compound code encoding the `BallInertiaBand` and whether the low or mid boost path was taken. The high nibble is `0x1` (low path) or `0x2` (mid path); the low nibble is the band index (0=ZERO, 1=VERY_LOW, 2=LOW_MID, 3=CARRY, 4=HIGH). For no-context calls the high nibble is `0x5`.
+
+### `DWORD GetLastPowerCtxCount()`
+
+Returns the value of `g_ctxCount` (from `GetContextCount()`) that was current at the time of the last power hook invocation.
+
+### `DWORD GetLastPowerHadNewCtx()`
+
+Returns `1` if a new pass context arrived between the previous and current power hook invocations (i.e. `g_ctxCount` advanced), `0` otherwise. When `0`, the power hook applies a no-context soft boost instead of the full distance-aware boost.
+
+### `DWORD GetLastBallD0XBits()` / `GetLastBallD0YBits()` / `GetLastBallD0ZBits()`
+
+Return the IEEE-754 bit representation (as `DWORD`) of the three float coordinates read from `ball+0xD0` / `ball+0xD4` / `ball+0xD8` (debug position) during the last power hook invocation. Convert to float via `memcpy` or a union.
+
+### `DWORD GetLastBall1454XBits()` / `GetLastBall1458YBits()` / `GetLastBall145CZBits()`
+
+Return the IEEE-754 bit representation of the secondary ball position coordinates at `ball+0x1454` / `ball+0x1458` / `ball+0x145C`.
+
+### `DWORD GetLastGeomDotBits()`
+
+Returns the IEEE-754 bit representation of the 2D normalized dot product computed by `ReadPassGeometryDot` during the last power hook invocation. Negative values indicate the ball was on the opposite side from the receiver.
+
+### `DWORD GetLastGeomBallDistBits()` / `GetLastGeomPassDistBits()`
+
+Return the IEEE-754 bit representation of the ball-to-passer distance (`ballLen`) and the passer-to-receiver distance (`passLen`) in world units.
+
+### `DWORD GetLastGeomPBallRaw()` / `GetLastGeomRBallRaw()`
+
+Return the raw `player+0x114` ball-distance values for the passer and receiver respectively, as read during the last power hook invocation.
+
+### `DWORD GetLastGeomHasData()`
+
+Returns `1` if `ReadPassGeometryDot` succeeded and produced valid geometry data during the last power hook invocation, `0` otherwise.
+
+### `DWORD GetLastAwkwardLongCandidate()`
+
+Returns `1` if the awkward-long-pass rescue conditions were evaluated as true during the last power hook invocation (geometry available, `distSimple >= awkwardLongDistMin`, `ediOriginal < awkwardLongEdiMax`, `geomDot <= awkwardLongDotMax`), `0` otherwise. Note that this flag indicates candidacy — the actual boost application also requires the EDI to be in the low range.
+
+---
+
+## MemoryPatch
+
+Declared in `MemoryPatch.h`. Provides the three low-level patching primitives used by both hook installers.
+
+### `bool CheckBytes(uintptr_t address, const unsigned char* expected, size_t count)`
+
+Reads `count` bytes at `address` and compares them byte-for-byte against `expected`. All reads are SEH-guarded. Returns `false` if any byte mismatches or if a structured exception occurs. Used by both `InstallContextHook` and `InstallPowerHook` to verify the correct PES6 binary before writing any patches.
+
+### `bool WriteJump(uintptr_t source, void* destination, size_t length)`
+
+Writes a `JMP rel32` instruction (5 bytes) at `source` pointing to `destination`, then fills any remaining bytes up to `length` with `NOP` (`0x90`). Uses `VirtualProtect` to temporarily grant write access to the code page. `length` must be at least 5. Returns `false` if `VirtualProtect` fails or if `length` is insufficient.
+
+### `bool WriteFloat(uintptr_t address, float value)`
+
+Writes a 4-byte IEEE-754 float at `address`. Uses `VirtualProtect` to grant write access. Returns `false` if `VirtualProtect` fails. Used by `ModState` to update the ball mass at `BALL_MASS_ADDRESS` when the mod is toggled.
+
+---
+
+## ModState
+
+Declared in `ModState.h`. Thread-safe mod enable/disable state backed by a `volatile LONG` and Win32 `Interlocked` operations. Also applies a complementary ball-mass patch on every state change.
+
+### `bool IsPhysicsModEnabled()`
+
+Thread-safe read of the mod state via `InterlockedCompareExchange`. Returns `true` if the mod is currently active.
+
+### `void SetPhysicsModEnabled(bool enabled)`
+
+Thread-safe write via `InterlockedExchange`, then immediately calls `WriteFloat(BALL_MASS_ADDRESS, ...)` to update the ball mass: `198.0f` when enabled, `188.0f` when disabled.
+
+### `bool TogglePhysicsModEnabled()`
+
+Atomically reads the current state, flips it, writes it back via `InterlockedExchange`, and calls `WriteFloat` to update the ball mass. Returns the new state (`true` = now enabled).
+
+---
+
+## HotkeyToggle
+
+Declared in `HotkeyToggle.h`. Runs a background polling thread that watches for the Ctrl+Shift+P key combination to toggle the mod at runtime.
+
+### `void StartHotkeyToggle()`
+
+Creates a Win32 thread that polls `GetAsyncKeyState` in a loop. When Ctrl+Shift+P is detected, calls `TogglePhysicsModEnabled()` and, if the Kitserver overlay is available, calls `ShowPhysicsModOverlayMessage` with the new state.
+
+### `void StopHotkeyToggle()`
+
+Signals the polling thread to exit. Called from `DllMain` on `DLL_PROCESS_DETACH`.
+
+---
+
+## KitserverOverlay
+
+Declared in `KitserverOverlay.h`. Integrates with Konami's Kitserver mod loader (`kload.dll`) to display an on-screen overlay message when the mod is toggled.
+
+### `bool InstallKitserverOverlay()`
+
+Attempts to resolve exported rendering hooks from `kload.dll` (which must already be loaded in the process). If found, hooks `hk_D3D_Present` to inject overlay rendering and initializes an internal critical section. Returns `false` if `kload.dll` is not present or the required exports cannot be resolved.
+
+### `void UninstallKitserverOverlay()`
+
+Unhooks `hk_D3D_Present` and frees the internal critical section. Called from `DllMain` on `DLL_PROCESS_DETACH`.
+
+### `void ShowPhysicsModOverlayMessage(bool enabled)`
+
+Schedules an on-screen status message to be rendered for approximately 2.2 seconds. The message text reflects the new mod state (enabled or disabled). Thread-safe via the internal critical section.
+
+### `bool IsKitserverOverlayAvailable()`
+
+Returns `true` if `InstallKitserverOverlay` succeeded and the `hk_D3D_Present` hook is currently active.
+
+---
+
+## Logger
+
+Declared in `Logger.h`. Append-mode file logger that writes to `D:\pes6_passspeed.log`. Controlled by a compile-time `ENABLED` flag in `Logger.cpp`; all functions are no-ops when `ENABLED = false`.
+
+### `void WriteLog(const char* text)`
+
+Appends `text` followed by `\r\n` to `D:\pes6_passspeed.log` using `CreateFileA` with `FILE_APPEND_DATA`. Opens and closes the file handle on every call. No-op if `ENABLED = false`.
+
+### `void LogFormat(const char* format, ...)`
+
+Printf-style wrapper around `WriteLog`. Formats `format` and the variadic arguments into a 1024-byte stack buffer via `vsprintf_s`, then passes the result to `WriteLog`. No-op if `ENABLED = false`.
+
+---
+
+## Boost Mode Code Table
+
+`g_lastBoostMode` is set by `CalculateModifiedEDI` on every power hook invocation to record which boost path was taken. Read via `GetLastBoostMode()`.
+
+| Code | Path | Description |
+|---|---|---|
+| `0x00` | Ignored | `ediOriginal >= ediThresholdIgnore` (`0x6400`). Pass power untouched; above the boost ceiling. |
+| `0x10` | Low | Base low boost only; distance 0–2. |
+| `0x12` | Low | Base low boost + distance 3–4 extra from `lowBoostTable`. |
+| `0x13` | Low | Base low boost + distance 7+ extra from `lowBoostTable`. |
+| `0x15` | Low | Base low boost + distance 5–6 extra from `lowBoostTable`. |
+| `0x17` | Low Short Rescue | Short-pass rescue applied (`shortRescueLow` path). |
+| `0x18` | Low Long Rescue | Long-distance rescue applied (`rescueLow` path). |
+| `0x19` | Low Soft Floor | Soft floor adjustment applied after base + extra. |
+| `0x1A` | Low Awkward Long | Awkward long-pass rescue applied: ball behind passer, long distance, low EDI. |
+| `0x1B` | Low Awkward Short | Awkward short-pass rescue applied: ball sharply behind passer, short distance, very low EDI. |
+| `0x1C` | Real Dist Under | Real-distance underestimate rescue applied: `distSimple` understated, geometric pass distance confirms a longer pass. |
+| `0x20` | Mid | Base mid boost only; distance 0–4. |
+| `0x23` | Mid | Base mid boost + distance 7+ extra from `midBoostTable`. |
+| `0x25` | Mid | Base mid boost + distance 5–6 extra from `midBoostTable`. |
+| `0x41` | No-Ctx Low | No new context available; low-range EDI. Applied `noContextLowBaseBoost` for the current `BallInertiaBand`. |
+| `0x42` | No-Ctx Mid | No new context available; mid-range EDI. Applied `noContextMidBaseBoost`. |
+| `0x99` | Cap Hit | Final EDI exceeded `ediMaxCap` (`0x6800`) and was clamped to it. |
+| `0xFE` | Mod Disabled | `IsPhysicsModEnabled()` returned `false`. EDI returned unchanged; full vanilla gameplay. |

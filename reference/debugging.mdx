@@ -1,0 +1,187 @@
+---
+title: "Debugging and Tuning the PES6 Physics Mod"
+sidebarTitle: "Debugging"
+description: "How to enable debug logging, interpret per-pass log entries, use boost mode codes to diagnose issues, and tune PassPowerConfig values based on log data."
+---
+
+The mod ships with a comprehensive debug logging system. Enabling it produces one log entry per second for each new pass context and power hook event, giving you full visibility into what the mod is doing on every pass. Because the monitor thread samples at a 1-second interval and only logs when the context or power counters have advanced, the log stays compact and is easy to read through even after a full match.
+
+---
+
+## Enabling Logging
+
+Logging is controlled by a single compile-time flag in `Logger.cpp`:
+
+```cpp
+static const bool ENABLED = false;   // change to true to enable
+```
+
+Set it to `true`, rebuild the DLL, and drop the new binary into your PES6 mod directory. The log file is always written to:
+
+```text
+D:\pes6_passspeed.log
+```
+
+The file is opened in append mode on every write, so it survives game restarts and successive sessions. Delete or rename it between test runs to keep entries from different sessions separate.
+
+<Warning>
+Logging calls `CreateFileA`, `WriteFile`, and `CloseHandle` on the disk path **on every pass event**. This adds measurable I/O overhead during a match. Enable logging only for debugging and tuning sessions — leave `ENABLED = false` during normal play.
+</Warning>
+
+---
+
+## Understanding Log Entries
+
+The monitor thread in `dllmain.cpp` samples `GetContextCount()` and `GetPowerCount()` once per second. When either counter advances since the last sample, a log line is emitted.
+
+### `[CTX]` — Pass Context Entry
+
+Emitted when `g_ctxCount` advances (Hook A fired at least once since the last sample):
+
+```text
+[CTX] passId=42 passer=0x1A2B3C4D receiver=0x4D3C2B1A p=(33,47) r=(38,51) dist=9
+```
+
+| Field | Source | Description |
+|---|---|---|
+| `passId` | `g_ctxCount` | Monotonically increasing pass sequence number since DLL load. |
+| `passer` | `GetSavedPasser()` | ESI value captured by Hook A — pointer to the passer's player struct. |
+| `receiver` | `GetSavedReceiver()` | EDX value captured by Hook A — pointer to the receiver's player struct. |
+| `p=(X,Y)` | `player+0x204`, `player+0x205` | Discrete grid cell coordinates of the passer. |
+| `r=(X,Y)` | `player+0x204`, `player+0x205` | Discrete grid cell coordinates of the receiver. |
+| `dist` | Computed | Manhattan distance: `abs(rX-pX) + abs(rY-pY)`. |
+
+If `ReadPassContextDistance` fails (null pointer or SEH exception), the line instead reads:
+
+```text
+[CTX] count=42 passer=0x1A2B3C4D receiver=0x4D3C2B1A ERROR leyendo +204/+205
+```
+
+### `[PWR]` — Pass Power Entry
+
+Emitted when `g_powerCount` advances (Hook B fired at least once since the last sample):
+
+```text
+[PWR] passId=42 pwrHit=1 edi=0x00003E00->0x00005100 ball50Before=4200 dist=9
+      boostMode=0x13 gate=0x22 newCtx=1
+      ballD0=(0.00,0.10,0.00) ball1454=(150.23,-0.05,88.11)
+      geom=1 dot=-0.12 ballDist=180.3 passDist=950.0
+      pBallRaw=1200 rBallRaw=8500 awkwardLong=0
+```
+
+| Field | Source | Description |
+|---|---|---|
+| `passId` | `GetLastPowerCtxCount()` | The `g_ctxCount` value current at the time of this power hook invocation — links back to its `[CTX]` entry. |
+| `pwrHit` | `GetPowerCount()` | Total power-hook invocations since DLL load (monotonically increasing). |
+| `edi=A->B` | `GetLastEDIOriginal()` / `GetLastEDIModified()` | Raw EDI from the game engine (before) and the rescaled EDI written to ball physics (after). |
+| `ball50Before` | `GetLastBall50Before()` | Value of `ball+0x50` read before `CALL_78020` fires — the ball's inertia from the previous pass, used for `BallInertiaBand` classification. |
+| `dist` | `GetLastDistSimple()` | Manhattan cell distance used for boost table lookup. |
+| `boostMode` | `GetLastBoostMode()` | Boost path code. See the [Boost Mode Code Table](/reference/api#boost-mode-code-table). |
+| `gate` | `GetLastBallGateMode()` | Compound inertia-band + path identifier. High nibble: `0x1`=low path, `0x2`=mid path, `0x5`=no-context. Low nibble: band index (0–4). |
+| `newCtx` | `GetLastPowerHadNewCtx()` | `1` if a fresh pass context arrived before this power hook fired; `0` if no new context (no-context boost path used). |
+| `ballD0=(X,Y,Z)` | `GetLastBallD0{X,Y,Z}Bits()` | Ball debug position at `ball+0xD0/D4/D8`, converted from IEEE-754 bits to float for display. |
+| `ball1454=(X,Y,Z)` | `GetLastBall1454XBits()` / `GetLastBall1458YBits()` / `GetLastBall145CZBits()` | Secondary ball position at `ball+0x1454/1458/145C`. |
+| `geom` | `GetLastGeomHasData()` | `1` if `ReadPassGeometryDot` returned valid geometry data; `0` if it failed (ball or player positions unavailable). |
+| `dot` | `GetLastGeomDotBits()` | Normalized 2D dot product of the pass vector vs. ball-offset vector. Negative = ball behind the passer relative to the pass direction. |
+| `ballDist` | `GetLastGeomBallDistBits()` | World-unit distance from passer to ball (`ballLen` in `ReadPassGeometryDot`). |
+| `passDist` | `GetLastGeomPassDistBits()` | World-unit distance from passer to receiver (`passLen` in `ReadPassGeometryDot`). |
+| `pBallRaw` | `GetLastGeomPBallRaw()` | Raw `player+0x114` ball-distance value for the passer. |
+| `rBallRaw` | `GetLastGeomRBallRaw()` | Raw `player+0x114` ball-distance value for the receiver. |
+| `awkwardLong` | `GetLastAwkwardLongCandidate()` | `1` if the awkward-long-pass rescue conditions were satisfied for this event. |
+
+---
+
+## Diagnosing Common Issues
+
+<Accordion title="Passes still feel weak (no boost applied)">
+Check the `boostMode` field:
+
+- **`0x00`** — The game's EDI was already at or above `ediThresholdIgnore` (`0x6400`). The mod deliberately does not touch passes above this threshold to avoid over-powering strong passes. If this fires too often, lower `ediThresholdIgnore` in `PassPowerConfig.cpp`.
+- **`0xFE`** — `IsPhysicsModEnabled()` returned `false`. The mod is toggled off. Press Ctrl+Shift+P in-game to re-enable, or check that `SetPhysicsModEnabled(true)` is called successfully in `MainThread`.
+- **`0x41` / `0x42`** with small edi delta — No new context arrived (`newCtx=0`). The no-context soft boost is intentionally conservative. Check that Hook A is firing (`passId` should be advancing in `[CTX]` lines).
+</Accordion>
+
+<Accordion title="Mod not activating — log shows [ERROR] on startup">
+The byte validation in `InstallContextHook` or `InstallPowerHook` failed. This means the bytes at the expected hook sites do not match the hardcoded sequences:
+
+- Hook A expects: `E8 66 BC FF FF 8B D8` at `pes6.exe+0x1A5905`
+- Hook B expects: `6A 00 55 57 50 56 E8 9A 1C ED FF` at `pes6.exe+0x1A637B`
+
+This is almost always caused by using a patched, cracked, or differently-versioned `pes6.exe`. The mod targets the **unmodified retail Win32 binary** only. Confirm you are using the correct executable and that no other memory-patching mod has already modified those addresses.
+</Accordion>
+
+<Accordion title="Cap hit (boostMode 0x99) too often">
+`boostMode=0x99` means the calculated EDI reached `ediMaxCap` (`0x6800` by default) and was clamped. If this fires on passes that still feel underpowered, the cap is too low for your playstyle. Raise `ediMaxCap` in `PassPowerConfig.cpp`:
+
+```cpp
+0x6800, // ediMaxCap — raise this value
+```
+
+Be conservative: values significantly above `0x6800` may produce unrealistically fast passes or interact badly with the ball physics simulation.
+</Accordion>
+
+<Accordion title="Awkward passes not being rescued">
+Check the following fields in the `[PWR]` entry:
+
+- **`geom=0`** — `ReadPassGeometryDot` failed. The ball or player logic positions were unavailable. Without geometry the awkward-pass detection is disabled entirely. This can happen if Hook A has not fired yet for that pass (`newCtx=0`).
+- **`dot` not negative enough** — The dot product was above `awkwardLongDotMax` (`-0.35f`) or `awkwardShortDotMax` (`-0.75f`). The geometry suggests the ball is not sufficiently behind the passer. Adjust those thresholds in `PassPowerConfig.cpp` if passes that feel awkward are not being caught.
+- **`dist` out of range** — Awkward long rescue requires `distSimple >= awkwardLongDistMin` (`6`); awkward short requires `distSimple` between `awkwardShortDistMin` (`3`) and `awkwardShortDistMax` (`4`). Check the `dist` field.
+- **`edi` too high** — Both rescues gate on `ediOriginal < awkwardLongEdiMax` / `awkwardShortEdiMax`. If the game's EDI was already high enough, no rescue is applied.
+</Accordion>
+
+<Accordion title="Kitserver overlay not showing after toggle">
+The overlay requires `kload.dll` to be loaded **before** the physics mod DLL. Check your Kitserver configuration and ensure the load order places `kload.dll` first. If the overlay was not found at startup, `InstallKitserverOverlay()` will have returned `false` and the log will show:
+
+```text
+[WARN] Overlay Kitserver no disponible. El toggle funcionara igual por log.
+```
+
+The mod toggle (Ctrl+Shift+P) still works in this case — the state change and ball mass patch are applied; only the visual overlay is absent. Verify the Kitserver version is compatible with PES6.
+</Accordion>
+
+---
+
+## Iterative Tuning Workflow
+
+Use the following loop to refine `PassPowerConfig` values until pass feel matches your target:
+
+<Steps>
+  <Step title="Enable logging and play a match">
+    Set `ENABLED = true` in `Logger.cpp`, rebuild, and play several passes of deliberately varied lengths — short, medium, long, and diagonal. Include both normal and awkward angles where the ball is behind you.
+  </Step>
+  <Step title="Find the passes that felt wrong">
+    Open `D:\pes6_passspeed.log` and look for `[PWR]` entries where the pass behaved unexpectedly. Sort by `dist` to group similar-distance passes together and compare their `edi` before/after values.
+  </Step>
+  <Step title="Read the key diagnostic fields">
+    For each problem pass note:
+    - `dist` — the cell-distance bucket that drove the boost table lookup
+    - `boostMode` — the exact code path taken (see [Boost Mode Code Table](/reference/api#boost-mode-code-table))
+    - `ball50Before` — the inertia band context
+    - `edi=A->B` — how much boost was actually applied
+    - `geom` / `dot` / `passDist` — whether geometry was available and what it showed
+  </Step>
+  <Step title="Map the boost path to the correct config field">
+    Cross-reference `dist` and `boostMode` to identify the `PassPowerConfig` field responsible:
+
+    | boostMode | dist | Field to adjust |
+    |---|---|---|
+    | `0x10` | 0–2 | `lowBoostTable.dist0_2[band]` or `baseLowBoost` |
+    | `0x12` | 3–4 | `lowBoostTable.dist3_4[band]` |
+    | `0x15` | 5–6 | `lowBoostTable.dist5_6[band]` |
+    | `0x13` | 7+ | `lowBoostTable.dist7_plus[band]` |
+    | `0x18` | 5+ | `rescueLowExtraHighInertia` / `rescueLowExtraOtherInertia` |
+    | `0x19` | 5+ | `softFloorLowDist5_6` / `softFloorLowDist7_plus` |
+    | `0x1A` | 6+ | `awkwardLongExtra` / `awkwardLongSoftFloor` |
+    | `0x1C` | 3–5 | `realDistUnderBoostExtra` / `realDistUnderDist34SoftFloor` etc. |
+    | `0x23` | 7+ | `midBoostTable.dist7_plus[band]` |
+    | `0x25` | 5–6 | `midBoostTable.dist5_6[band]` |
+
+    The `band` index corresponds to the `BallInertiaBand` derived from `ball50Before`: 0=ZERO (0), 1=VERY_LOW (≤2500), 2=LOW_MID (≤5000), 3=CARRY (≤7250), 4=HIGH (>7250).
+  </Step>
+  <Step title="Adjust the config value and rebuild">
+    Edit the relevant field in `PassPowerConfig.cpp` and rebuild the DLL. Increment or decrement by `0x0100`–`0x0200` at a time to make controlled changes. Replace the DLL in your PES6 directory.
+  </Step>
+  <Step title="Repeat">
+    Play the same types of passes again, compare the new `[PWR]` entries to the previous ones, and iterate until pass feel is correct. Once tuning is complete, set `ENABLED = false` in `Logger.cpp` and do a final release build.
+  </Step>
+</Steps>

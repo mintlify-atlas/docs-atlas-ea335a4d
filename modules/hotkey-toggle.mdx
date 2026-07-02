@@ -1,0 +1,95 @@
+---
+title: "HotkeyToggle: Ctrl+Shift+P Runtime Toggle"
+sidebarTitle: "HotkeyToggle"
+description: "How HotkeyToggle polls for Ctrl+Shift+P on a background thread to toggle physics mod state at runtime and display Kitserver overlay feedback."
+---
+
+HotkeyToggle runs a background Win32 thread that polls keyboard state every 25 milliseconds. When the combination Ctrl+Shift+P is detected, it calls `TogglePhysicsModEnabled()` and, if Kitserver is available, triggers the on-screen overlay message to display the new state. The polling thread starts after both hooks are successfully installed and runs until DLL unload.
+
+## Public API
+
+### `StartHotkeyToggle`
+
+```cpp
+void StartHotkeyToggle();
+```
+
+Sets `g_hotkeyRunning = true` and calls `CreateThread` to start `HotkeyThreadProc`. Called from `MainThread` in `dllmain.cpp` after `InstallContextHook`, `InstallPowerHook`, and the optional Kitserver overlay are all set up.
+
+If `CreateThread` succeeds, the returned handle is immediately closed with `CloseHandle` and the local handle variable is set to `nullptr`. The thread continues running — handle closure only releases the kernel handle resource, not the thread itself. If `CreateThread` fails, `g_hotkeyRunning` is reset to `false` and an error is written to the log.
+
+If `StartHotkeyToggle` is called again while the thread is already running, the guard `if (g_hotkeyRunning) return;` prevents a second thread from being created.
+
+---
+
+### `StopHotkeyToggle`
+
+```cpp
+void StopHotkeyToggle();
+```
+
+Sets `g_hotkeyRunning = false`. The polling thread checks this flag at the top of each 25 ms iteration and exits its loop naturally, logging `"[HOTKEY] Thread finalizado."` before returning. Called from the `DLL_PROCESS_DETACH` branch of `DllMain`.
+
+## Polling Logic
+
+The thread function `HotkeyThreadProc` uses two helper predicates:
+
+```cpp
+static bool IsKeyDown(int vk)
+{
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+static bool WasKeyPressedNow(int vk)
+{
+    return (GetAsyncKeyState(vk) & 0x0001) != 0;
+}
+```
+
+`IsKeyDown` checks the high-order bit of `GetAsyncKeyState` — true while the key is physically held. `WasKeyPressedNow` checks the low-order bit — true only on the **leading edge** of a key press (set when the key transitions from up to down since the last call for this thread).
+
+The toggle fires when `VK_CONTROL` and `VK_SHIFT` are held **and** `'P'` has a leading-edge transition. Using `WasKeyPressedNow` for `P` means the toggle fires exactly once per press regardless of how long `P` is held.
+
+## Full Thread Implementation
+
+```cpp
+static DWORD WINAPI HotkeyThreadProc(LPVOID)
+{
+    WriteLog("[HOTKEY] Thread iniciado. Toggle: Ctrl + Shift + P");
+
+    while (g_hotkeyRunning)
+    {
+        bool ctrl = IsKeyDown(VK_CONTROL);
+        bool shift = IsKeyDown(VK_SHIFT);
+        bool pPressed = WasKeyPressedNow('P');
+
+        if (ctrl && shift && pPressed)
+        {
+            bool enabled = TogglePhysicsModEnabled();
+
+            LogFormat(
+                "[HOTKEY] Mod de fisicas %s",
+                enabled ? "ACTIVADO" : "DESACTIVADO"
+            );
+
+            ShowPhysicsModOverlayMessage(enabled);
+        }
+
+        Sleep(25);
+    }
+
+    WriteLog("[HOTKEY] Thread finalizado.");
+
+    return 0;
+}
+```
+
+The `Sleep(25)` call at the end of each loop iteration gives the thread a 40 Hz polling rate. This is more than sufficient for human key detection latency while keeping CPU usage negligible.
+
+<Tip>
+  The leading-edge check (`& 0x0001`) on the `P` key prevents the toggle from firing repeatedly if the player holds the key down. Without it, the mod state would flip back and forth multiple times per second for as long as `P` is held, since each 25 ms poll would see the key still down.
+</Tip>
+
+<Note>
+  The thread handle returned by `CreateThread` is closed immediately after creation with `CloseHandle`. This is intentional and correct Win32 practice. Closing the handle does **not** terminate the thread — it only releases the caller's reference to the kernel thread object. The thread continues executing `HotkeyThreadProc` until `g_hotkeyRunning` becomes `false`.
+</Note>

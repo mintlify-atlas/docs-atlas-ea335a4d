@@ -1,0 +1,207 @@
+---
+title: "PassContext: Capturing Pass Geometry in PES6"
+sidebarTitle: "Pass Context"
+description: "How PassContext captures passer and receiver memory pointers, reads player cell coordinates, computes discrete distance, and calculates real-world dot-product geometry."
+---
+
+PassContext is the information-gathering module of the mod. Its sole job is to observe the pass event at the moment PES6 prepares the pass and record which player is passing, which player is receiving, and where they are on the pitch. Without this information, the power calculation module `PassPower` would have no way to distinguish a short tap from a long switch, or to identify an awkward back-foot pass from a clean forward ball. Every piece of data that feeds the rescaling logic — grid distance, world-space vectors, dot products — originates here.
+
+## Internal globals
+
+```c
+static volatile DWORD g_savedPasser   = 0;  // pointer to passer's player struct
+static volatile DWORD g_savedReceiver = 0;  // pointer to receiver's player struct
+static volatile DWORD g_ctxCount      = 0;  // incremented each time a new pass is detected
+```
+
+These are written by the naked hook `Hook_Context_1A5905` and read by `PassPower` and the monitor thread in `dllmain.cpp`. They are declared `volatile` because the hook runs in the game's own thread while readers run in the monitor thread.
+
+## Public API
+
+```c
+// Install the JMP hook at pes6.exe+1A5905.
+// Returns false (and writes nothing) if the expected bytes are not found.
+bool InstallContextHook(uintptr_t pesBase);
+
+// Returns the total number of pass context captures since startup.
+DWORD GetContextCount();
+
+// Returns the raw pointer to the passer's in-memory player structure.
+DWORD GetSavedPasser();
+
+// Returns the raw pointer to the receiver's in-memory player structure.
+DWORD GetSavedReceiver();
+
+// Reads the discrete grid-cell coordinates stored at player+0x204 (cell X)
+// and player+0x205 (cell Y) for both players, then returns the Manhattan
+// distance: abs(receiverX - passerX) + abs(receiverY - passerY).
+bool ReadPassContextDistance(
+    DWORD  passer,
+    DWORD  receiver,
+    BYTE*  passerX,
+    BYTE*  passerY,
+    BYTE*  receiverX,
+    BYTE*  receiverY,
+    int*   distSimple
+);
+
+// Reads 3D world positions for passer, receiver, and ball, then computes
+// the normalized dot product between the pass direction vector and the
+// ball-to-passer direction vector.
+bool ReadPassGeometryDot(
+    DWORD  passer,
+    DWORD  receiver,
+    float* outDot,
+    float* outBallDist,
+    float* outPassDist,
+    DWORD* outPasserBallDistRaw,
+    DWORD* outReceiverBallDistRaw
+);
+```
+
+## Memory structures
+
+PassContext reads from several in-game memory regions discovered via Cheat Engine analysis.
+
+### Player cell coordinates
+
+Used by `ReadPassContextDistance` to compute the Manhattan grid distance.
+
+| Offset from player base | Field | Type |
+|---|---|---|
+| `+0x204` (`PLAYER_CELL_X`) | Grid cell X | `BYTE` |
+| `+0x205` (`PLAYER_CELL_Y`) | Grid cell Y/Z | `BYTE` |
+
+### Player logic position
+
+Used by `ReadPassGeometryDot` for world-space vector math. These are the primary position values read in `ReadPlayerLogicPos`:
+
+| Offset from player base | Field | Type |
+|---|---|---|
+| `+0xE0` | Logic position X | `float` |
+| `+0xE4` | Logic position Y (height) | `float` |
+| `+0xE8` | Logic position Z (pitch depth) | `float` |
+
+### Player physics position (secondary read path)
+
+Also read in `ReadPlayerWorldPos` via a pointer dereference: `player+0xD0` holds a pointer to a separate physics struct.
+
+| Offset | Field | Type |
+|---|---|---|
+| `player+0xD0` | Pointer to physics struct | `DWORD*` |
+| `phys+0x00` | World position X | `float` |
+| `phys+0x04` | World position Y (height) | `float` |
+| `phys+0x08` | World position Z (pitch depth) | `float` |
+
+### Player raw ball-distance value
+
+```c
+// player+0x114 — raw proximity/distance value between the player and the ball
+DWORD ReadPlayerBallDistanceRaw(DWORD player)
+{
+    return *(DWORD*)(player + 0x114);
+}
+```
+
+This value is returned via `outPasserBallDistRaw` and `outReceiverBallDistRaw` from `ReadPassGeometryDot` and logged by the monitor thread as `pBallRaw` / `rBallRaw`.
+
+### Ball world position
+
+The ball base address is resolved through a global pointer:
+
+```c
+// [pes6.exe + 0x7CCE94] = ball base pointer (PesAddresses::BALL_GLOBAL_PTR)
+DWORD ballBase = *(DWORD*)(g_base + PesAddresses::BALL_GLOBAL_PTR);
+```
+
+| Offset from ball base | Field | Type |
+|---|---|---|
+| `+0x20` | World position X | `float` |
+| `+0x24` | World position Y (height) | `float` |
+| `+0x28` | World position Z (pitch depth) | `float` |
+
+## Discrete distance — `ReadPassContextDistance`
+
+The simplest distance metric reads the two single-byte cell coordinates for each player and returns their Manhattan sum:
+
+```c
+bool ReadPassContextDistance(
+    DWORD passer, DWORD receiver,
+    BYTE* passerX, BYTE* passerY,
+    BYTE* receiverX, BYTE* receiverY,
+    int* distSimple)
+{
+    *passerX   = *(BYTE*)(passer   + PesOffsets::PLAYER_CELL_X);  // +0x204
+    *passerY   = *(BYTE*)(passer   + PesOffsets::PLAYER_CELL_Y);  // +0x205
+    *receiverX = *(BYTE*)(receiver + PesOffsets::PLAYER_CELL_X);
+    *receiverY = *(BYTE*)(receiver + PesOffsets::PLAYER_CELL_Y);
+
+    int dx = abs((int)*receiverX - (int)*passerX);
+    int dy = abs((int)*receiverY - (int)*passerY);
+    *distSimple = dx + dy;
+    return true;
+}
+```
+
+Both memory reads are wrapped in a `__try / __except(EXCEPTION_EXECUTE_HANDLER)` block so that a bad pointer cannot crash the game. The resulting `distSimple` value is what the boost lookup tables in `PassPower` are indexed against.
+
+## Dot-product geometry — `ReadPassGeometryDot`
+
+Where the discrete distance tells *how far*, the dot product tells *which direction relative to the ball*. This is used to detect awkward passes where the ball is physically behind or to the side of the passer relative to the direction the pass is intended.
+
+```c
+bool ReadPassGeometryDot(
+    DWORD passer, DWORD receiver,
+    float* outDot, float* outBallDist, float* outPassDist,
+    DWORD* outPasserBallDistRaw, DWORD* outReceiverBallDistRaw)
+{
+    Vec3 ball = {}, ppos = {}, rpos = {};
+
+    if (!ReadBallWorldPos(&ball))       return false;
+    if (!ReadPlayerLogicPos(passer,   &ppos)) return false;
+    if (!ReadPlayerLogicPos(receiver, &rpos)) return false;
+
+    // Pass direction vector (passer → receiver), XZ plane only
+    float passX = rpos.x - ppos.x;
+    float passZ = rpos.z - ppos.z;
+
+    // Ball direction vector (passer → ball), XZ plane only
+    float ballX = ball.x - ppos.x;
+    float ballZ = ball.z - ppos.z;
+
+    float passLen = sqrtf(passX*passX + passZ*passZ);
+    float ballLen = sqrtf(ballX*ballX + ballZ*ballZ);
+
+    if (passLen < 1.0f || ballLen < 1.0f) return false;  // degenerate
+
+    // Normalized dot product: 1.0 = ball perfectly in front along pass line
+    //                         0.0 = ball perpendicular
+    //                        -1.0 = ball directly behind relative to pass
+    float dot = (passX*ballX + passZ*ballZ) / (passLen * ballLen);
+
+    *outDot      = dot;
+    *outBallDist = ballLen;
+    *outPassDist = passLen;
+
+    *outPasserBallDistRaw   = ReadPlayerBallDistanceRaw(passer);
+    *outReceiverBallDistRaw = ReadPlayerBallDistanceRaw(receiver);
+    return true;
+}
+```
+
+The calculation operates only on the **XZ plane** (horizontal pitch coordinates), ignoring the Y (height) component. This is intentional: a lofted pass still has the same horizontal pass direction as a ground pass.
+
+**Interpreting the dot product:**
+
+| `dot` value | Meaning |
+|---|---|
+| Close to `+1.0` | Ball is ahead of the passer, aligned with the pass direction — ideal condition |
+| Near `0.0` | Ball is roughly perpendicular to the pass direction |
+| `≤ −0.35` | Ball is on the opposite side — **awkward long pass candidate** |
+| `≤ −0.75` | Ball is strongly behind the passer relative to pass direction — **awkward short pass candidate** |
+
+A negative dot product indicates that the ball is on the opposite side of the passer from the receiver. PES6 typically underestimates power for these passes because its internal calculation does not account for the extra inertia the player must overcome to redirect the ball. The awkward-angle rescue paths in `PassPower` use these thresholds to apply a corrective boost.
+
+<Tip>
+  The geometry values (`geomDot`, `geomBallDist`, `geomPassDist`, `pBallRaw`, `rBallRaw`) are all logged by the monitor thread in `dllmain.cpp` on every power event, making them available in the debug log for tuning sessions without needing to attach a debugger.
+</Tip>

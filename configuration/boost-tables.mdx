@@ -1,0 +1,165 @@
+---
+title: "Distance Boost Tables: Lookup-Table Pass Power Tuning"
+sidebarTitle: "Boost Tables"
+description: "How the DistanceBoostTable struct provides a 4×5 matrix of boost extras indexed by distance bracket and ball inertia band, and how to tune each value."
+---
+
+The `DistanceBoostTable` is a **4 × 5 matrix** — four distance brackets by five inertia bands — that provides additional boost on top of the flat base boost. Two independent tables are held in `g_passConfig`: `lowBoostTable` is applied when the pass EDI is strictly below `ediThresholdLow` (the LOW path), and `midBoostTable` is applied when EDI is at or above `ediThresholdLow` but still below `ediThresholdIgnore` (the MID path). Every cell in both tables is independently tunable, letting you dial in a different correction for, say, a short pass from a stationary ball versus a long first-time pass from a fast-moving ball.
+
+---
+
+## Struct Definition
+
+```cpp
+// Array index corresponds to BallInertiaBand
+// (0 = ZERO, 1 = VERY_LOW, 2 = LOW_MID, 3 = CARRY, 4 = HIGH)
+struct DistanceBoostTable {
+    DWORD dist0_2[5];
+    DWORD dist3_4[5];
+    DWORD dist5_6[5];
+    DWORD dist7_plus[5];
+};
+```
+
+The struct is embedded twice inside `PassPowerConfig`:
+
+```cpp
+struct PassPowerConfig {
+    BallInertiaConfig   inertia;
+    DistanceBoostTable  lowBoostTable;
+    DistanceBoostTable  midBoostTable;
+    // … other fields …
+};
+```
+
+---
+
+## Distance Brackets
+
+`distSimple` is the game's discrete grid distance between passer and receiver positions. The four brackets collapse that grid into four boost tiers:
+
+| Bracket field | `distSimple` range | Description |
+|---|---|---|
+| `dist0_2` | 0 – 2 | Very short pass — same zone or immediately adjacent. |
+| `dist3_4` | 3 – 4 | Short-to-medium pass — one or two grid zones away. |
+| `dist5_6` | 5 – 6 | Medium pass — meaningful distance but not a long ball. |
+| `dist7_plus` | 7 and above | Long pass — full switch, deep through ball, or clearance. |
+
+---
+
+## Lookup Functions
+
+The `GetLowDistanceExtra` and `GetMidDistanceExtra` functions in `PassPower.cpp` select the correct cell using a simple cascade:
+
+```cpp
+static DWORD GetLowDistanceExtra(int distSimple, BallInertiaBand band)
+{
+    if (distSimple <= 2) return g_passConfig.lowBoostTable.dist0_2[band];
+    if (distSimple <= 4) return g_passConfig.lowBoostTable.dist3_4[band];
+    if (distSimple <= 6) return g_passConfig.lowBoostTable.dist5_6[band];
+    return g_passConfig.lowBoostTable.dist7_plus[band];
+}
+
+static DWORD GetMidDistanceExtra(int distSimple, BallInertiaBand band)
+{
+    if (distSimple <= 2) return g_passConfig.midBoostTable.dist0_2[band];
+    if (distSimple <= 4) return g_passConfig.midBoostTable.dist3_4[band];
+    if (distSimple <= 6) return g_passConfig.midBoostTable.dist5_6[band];
+    return g_passConfig.midBoostTable.dist7_plus[band];
+}
+```
+
+The returned value is added to EDI **after** the flat base boost (`baseLowBoost` or `baseMidBoost`) has already been applied. The table extra and the base boost are always summed; the table cannot reduce the base.
+
+---
+
+## Default lowBoostTable
+
+Applied when EDI < `ediThresholdLow` (0x5800 / 22528).
+
+| Distance | `BALL_ZERO` | `BALL_VERY_LOW` | `BALL_LOW_MID` | `BALL_CARRY` | `BALL_HIGH` |
+|---|---|---|---|---|---|
+| **0–2** | 0 | 0 | 0 | 0 | 0 |
+| **3–4** | 0x0100 (256) | 0x0200 (512) | 0x0180 (384) | 0x0100 (256) | 0x0180 (384) |
+| **5–6** | 0x0280 (640) | 0x0480 (1152) | 0x0380 (896) | 0x0200 (512) | 0x0380 (896) |
+| **7+** | 0x0700 (1792) | 0x0B00 (2816) | 0x0900 (2304) | 0x0500 (1280) | 0x0700 (1792) |
+
+**Key observations:**
+- `dist0_2` is all zeros — very short passes in the LOW range only receive `baseLowBoost` and any applicable rescue; they do not get an additional table extra.
+- `BALL_VERY_LOW` carries the highest extras across all distance brackets because a near-dead ball contributes the least to the kick and the game under-powers these passes the most.
+- `BALL_CARRY` receives the smallest non-zero extras; the ball's own momentum is already contributing, so less correction is needed.
+
+---
+
+## Default midBoostTable
+
+Applied when EDI ≥ `ediThresholdLow` (0x5800) and < `ediThresholdIgnore` (0x6400).
+
+| Distance | `BALL_ZERO` | `BALL_VERY_LOW` | `BALL_LOW_MID` | `BALL_CARRY` | `BALL_HIGH` |
+|---|---|---|---|---|---|
+| **0–2** | 0 | 0 | 0 | 0 | 0 |
+| **3–4** | 0 | 0 | 0 | 0 | 0 |
+| **5–6** | 0x0100 (256) | 0x0200 (512) | 0x0180 (384) | 0x0100 (256) | 0x0180 (384) |
+| **7+** | 0x0280 (640) | 0x0500 (1280) | 0x0400 (1024) | 0x0200 (512) | 0x0380 (896) |
+
+**Key observations:**
+- Both `dist0_2` and `dist3_4` are entirely zero — mid-range EDI passes at short distance already have adequate power; the flat `baseMidBoost` alone is sufficient.
+- The mid table extras are uniformly smaller than their `lowBoostTable` counterparts because mid-range passes are already stronger and need gentler correction.
+- `BALL_VERY_LOW` at `dist7_plus` still receives the largest mid-table extra (0x0500) for the same reason as in the low table.
+
+---
+
+## Fine-Tune Pass
+
+After all table boosts and rescue paths are applied, `ApplyDistance3To6FineTune()` adds an extra **5%** of the total boost applied so far, but only for passes in the `dist3_4` and `dist5_6` brackets:
+
+```cpp
+static DWORD ApplyDistance3To6FineTune(DWORD ediOriginal, DWORD edi, int distSimple)
+{
+    if (distSimple < 3 || distSimple > 6)
+    {
+        return edi;
+    }
+
+    if (edi <= ediOriginal)
+    {
+        return edi;
+    }
+
+    DWORD boostApplied = edi - ediOriginal;
+
+    // +5%, rounded down to avoid overshoot.
+    DWORD extra = boostApplied / 20;
+
+    return edi + extra;
+}
+```
+
+<Note>
+  The fine-tune pass is applied **after** all table and rescue boosts but **before** the global `ediMaxCap` clamp. It does not run on no-context passes, and it is intentionally excluded from `dist0_2` (too short to need it) and `dist7_plus` (long passes are already given large table extras). The awkward-short rescue re-applies its `awkwardShortPostEdiMax` or `awkwardShortRealLongPostEdiMax` cap **after** this fine-tune to prevent the 5% from pushing EDI above the rescue's own ceiling.
+</Note>
+
+---
+
+## Tuning Guide
+
+<Accordion title="Long passes still feel weak (dist7_plus)">
+  Increase the `dist7_plus` row values in `lowBoostTable`. Start with the `BALL_ZERO` and `BALL_VERY_LOW` columns, which have the most impact on dead-ball long passes. For example, raising `BALL_VERY_LOW` from `0x0B00` to `0x0D00` adds 512 more units to every low-EDI long pass from a near-stationary ball.
+
+  ```cpp
+  // Example: stronger long pass boost for very-low inertia
+  { 0x0700, 0x0D00, 0x0900, 0x0500, 0x0700 }  // dist7_plus
+  ```
+</Accordion>
+
+<Accordion title="BALL_VERY_LOW passes feel over-boosted">
+  Reduce the `BALL_VERY_LOW` column (index 1) across the affected distance rows. If the problem is specifically on medium passes, lower `dist5_6[1]` in `lowBoostTable` first. If it affects short passes, check `dist3_4[1]` and also `noContextLowBaseBoost[1]` (which applies when no pass context is available).
+</Accordion>
+
+<Accordion title="Short passes are too weak on the LOW path">
+  The `dist0_2` row is intentionally all zeros — very short passes only get `baseLowBoost`. To add a table extra for those passes, set non-zero values in `lowBoostTable.dist0_2`. Be conservative: `dist0_2` covers passes where the receiver is nearly at the passer's feet, so even small values have a large relative impact.
+</Accordion>
+
+<Accordion title="MID path passes feel flat at all distances">
+  Increase `baseMidBoost` for a uniform lift, or increase individual rows in `midBoostTable` for distance-specific corrections. The mid table intentionally has zero entries for `dist0_2` and `dist3_4` — if you want mid-path short passes to receive extra, add small values to those rows.
+</Accordion>

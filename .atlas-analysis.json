@@ -1,0 +1,100 @@
+{
+  "projectType": "general",
+  "projectName": "PES6 Game Physics Mod",
+  "projectDescription": "A Win32 DLL plugin for Pro Evolution Soccer 6 that intercepts the game's physics integrator to dynamically rescale pass power vectors, eliminating dead-pass inertia and producing more fluid, distance-aware first-touch passing.",
+  "theme": "aspen",
+  "primaryColor": "#1E6B3C",
+  "lightColor": "#D4EDDA",
+  "darkColor": "#0D3B20",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/hooks",
+              "architecture/pass-context",
+              "architecture/pass-power"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/pass-power-config",
+              "configuration/inertia-bands",
+              "configuration/boost-tables"
+            ]
+          },
+          {
+            "group": "Modules",
+            "pages": [
+              "modules/memory-patch",
+              "modules/mod-state",
+              "modules/hotkey-toggle",
+              "modules/kitserver-overlay",
+              "modules/logger"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/pes-addresses",
+              "reference/api",
+              "reference/debugging"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Non-destructive JMP hook injection into the PES6 physics integrator at runtime",
+    "Dual hook system: Context Hook captures passer/receiver pointers; Power Hook intercepts and modifies EDI (pass power) before application",
+    "Distance-aware power rescaling using discrete cell distance and real Euclidean geometry",
+    "Ball inertia band classification (ZERO, VERY_LOW, LOW_MID, CARRY, HIGH) for fine-grained boost selection",
+    "Lookup-table driven boost configuration (DistanceBoostTable) fully editable at compile time",
+    "Awkward-angle rescue logic using dot-product geometry to fix passes where the ball is behind the passer",
+    "Runtime toggle via Ctrl+Shift+P hotkey with thread-safe state management",
+    "Optional Kitserver overlay integration via dynamic kload.dll binding for in-game status display",
+    "Structured debug log with per-pass metrics: coordinates, distances, EDI before/after, boost mode",
+    "Ball mass adjustment (188/198) synchronized with mod enable/disable state"
+  ],
+  "publicApiSurface": [
+    "InstallContextHook(uintptr_t pesBase) -> bool",
+    "InstallPowerHook(uintptr_t pesBase) -> bool",
+    "CalculateModifiedEDI(DWORD ediOriginal) -> DWORD",
+    "ReadPassContextDistance(DWORD passer, DWORD receiver, BYTE* pX, BYTE* pY, BYTE* rX, BYTE* rY, int* dist) -> bool",
+    "ReadPassGeometryDot(DWORD passer, DWORD receiver, float* dot, float* ballDist, float* passDist, DWORD* pBallRaw, DWORD* rBallRaw) -> bool",
+    "GetContextCount() -> DWORD",
+    "GetSavedPasser() -> DWORD",
+    "GetSavedReceiver() -> DWORD",
+    "GetPowerCount() -> DWORD",
+    "GetLastBoostMode() -> DWORD",
+    "GetLastBallGateMode() -> DWORD",
+    "IsPhysicsModEnabled() -> bool",
+    "SetPhysicsModEnabled(bool enabled) -> void",
+    "TogglePhysicsModEnabled() -> bool",
+    "StartHotkeyToggle() -> void",
+    "StopHotkeyToggle() -> void",
+    "InstallKitserverOverlay() -> bool",
+    "UninstallKitserverOverlay() -> void",
+    "ShowPhysicsModOverlayMessage(bool enabled) -> void",
+    "CheckBytes(uintptr_t address, const unsigned char* expected, size_t count) -> bool",
+    "WriteJump(uintptr_t source, void* destination, size_t length) -> bool",
+    "WriteFloat(uintptr_t address, float value) -> bool",
+    "WriteLog(const char* text) -> void",
+    "LogFormat(const char* format, ...) -> void",
+    "g_passConfig (PassPowerConfig) — global configuration instance"
+  ]
+}

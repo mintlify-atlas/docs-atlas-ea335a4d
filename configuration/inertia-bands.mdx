@@ -1,0 +1,86 @@
+---
+title: "Ball Inertia Bands: Classifying Pre-Pass Ball Energy"
+sidebarTitle: "Inertia Bands"
+description: "How the BallInertiaBand enum classifies ball energy at pass time into five categories, and how each band receives different boost magnitudes in the lookup tables."
+---
+
+Before boosting a pass, the mod reads `ball+0x50` (the `BALL_POWER` offset) from the game's ball object pointer just before the original physics function at `pes6.exe+78020` would overwrite it. This unsigned 32-bit value represents the ball's current inertia and momentum at the moment the kick is initiated — the energy the ball is already carrying into the new pass. The `GetBallInertiaBand()` function maps that raw value into one of five discrete bands, and every distance boost lookup table is indexed by that band so that passes made from a fast-moving ball receive different corrections than passes from a stationary one.
+
+---
+
+## The BallInertiaBand Enum
+
+```cpp
+enum BallInertiaBand
+{
+    BALL_ZERO     = 0,
+    BALL_VERY_LOW = 1,
+    BALL_LOW_MID  = 2,
+    BALL_CARRY    = 3,
+    BALL_HIGH     = 4
+};
+```
+
+---
+
+## Band Classification Table
+
+| Band | Value | `ball+0x50` Range | In-Game Meaning |
+|------|-------|-------------------|-----------------|
+| `BALL_ZERO` | 0 | exactly **0** | Ball is completely stationary. A pass initiated from a dead stop — set piece, keeper restart, or ball that settled fully. |
+| `BALL_VERY_LOW` | 1 | **1 – 2500** | Minimal rolling momentum. The ball is barely moving — nearly dead after a slow pass or a light touch. Energy transfer into the new pass is poorest here. |
+| `BALL_LOW_MID` | 2 | **2501 – 5000** | Light carry. A player controlling a slow-rolling ball. Moderate energy available to redirect into the kick. |
+| `BALL_CARRY` | 3 | **5001 – 7250** | Moderate carry. The ball is arriving from a short or medium pass with reasonable pace. A first-time pass in this state transfers noticeably more energy. |
+| `BALL_HIGH` | 4 | **> 7250** | High momentum. The ball is arriving fast — from a long pass, a clearance rebound, or a deflected shot. First-time passes in this state get the most favorable inertia contribution. |
+
+The upper limits for `BALL_VERY_LOW`, `BALL_LOW_MID`, and `BALL_CARRY` are controlled by the three fields of `BallInertiaConfig` in `g_passConfig`:
+
+```cpp
+struct BallInertiaConfig {
+    DWORD veryLowLimit;  // default 2500  — ceiling for BALL_VERY_LOW
+    DWORD lowMidLimit;   // default 5000  — ceiling for BALL_LOW_MID
+    DWORD carryLimit;    // default 7250  — ceiling for BALL_CARRY
+};
+```
+
+`BALL_ZERO` is always exactly zero and `BALL_HIGH` is always everything above `carryLimit` — neither has a configurable threshold.
+
+---
+
+## Classification Logic
+
+The classification is performed by `GetBallInertiaBand()` in `PassPower.cpp`:
+
+```cpp
+static BallInertiaBand GetBallInertiaBand(DWORD ball50Before)
+{
+    if (ball50Before == 0) return BALL_ZERO;
+    if (ball50Before <= g_passConfig.inertia.veryLowLimit) return BALL_VERY_LOW;
+    if (ball50Before <= g_passConfig.inertia.lowMidLimit)  return BALL_LOW_MID;
+    if (ball50Before <= g_passConfig.inertia.carryLimit)   return BALL_CARRY;
+    return BALL_HIGH;
+}
+```
+
+The function uses a simple cascade of `<=` comparisons. Because each comparison returns immediately, the cost is a handful of instructions and there is no branch misprediction issue at this resolution. The returned band is passed directly as an array index into the 5-element `dist*[5]` rows of every `DistanceBoostTable`.
+
+---
+
+## Why Band Matters
+
+A player with a high-momentum ball (`BALL_HIGH`) naturally transfers more energy into a kick than a player receiving a slow ball (`BALL_ZERO` or `BALL_VERY_LOW`). PES6's native physics integrator accounts for some of this, but the mod's boost tables allow fine-grained correction per band:
+
+- **`BALL_VERY_LOW`** receives the largest extra boosts in `lowBoostTable` (e.g., `0x0B00` for `dist7_plus`) because the game most severely under-powers long passes made from nearly dead balls.
+- **`BALL_CARRY`** receives smaller extras (e.g., `0x0500` for `dist7_plus`) because the ball already contributes moderate energy to the kick.
+- **`BALL_HIGH`** receives moderate boosts (e.g., `0x0700` for `dist7_plus`) — less than `BALL_VERY_LOW` but more than `BALL_CARRY`, reflecting the asymmetry of the game engine's own inertia handling.
+- **`BALL_ZERO`** and **`BALL_LOW_MID`** occupy the remaining columns with values tuned for their specific feel.
+
+The no-context path (`noContextLowBaseBoost[5]`) is also indexed by band, applying `0x0600` for `BALL_VERY_LOW` and `0x0400` for `BALL_ZERO`, `BALL_CARRY`, and `BALL_HIGH`.
+
+---
+
+## Tuning the Thresholds
+
+<Tip>
+  **If most passes feel under-boosted across the board**, lower `inertia.veryLowLimit` — this pushes more ball states into `BALL_ZERO` (which you can then give a higher explicit boost) and broadens the range that is called `BALL_VERY_LOW`. Conversely, if `BALL_CARRY` passes feel over-boosted on first-time passes, **raise `inertia.carryLimit`** so that fewer high-pace balls land in `BALL_HIGH` where they receive the highest table values. Always adjust one threshold at a time and test with a repeatable pass scenario (e.g., a set-piece long pass at a fixed input level) to isolate the effect.
+</Tip>

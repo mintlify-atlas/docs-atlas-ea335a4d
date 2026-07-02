@@ -1,0 +1,56 @@
+---
+title: "PES6 Game Physics Mod: Pass Power Enhancement"
+sidebarTitle: "Introduction"
+description: "Learn how PES6 Game Physics Mod fixes dead-pass inertia in Pro Evolution Soccer 6 using runtime DLL hooks and distance-aware power rescaling."
+---
+
+Pro Evolution Soccer 6's pass engine has a well-known flaw: first-touch passes — especially over longer distances or at awkward angles — frequently lose too much inertia because the game's integrator prioritizes animation and player positioning over the user's intended power. The result is sluggish, easily-intercepted deliveries that break the flow of quick combination play. **PES6 Game Physics Mod** solves this by injecting a Win32 DLL into the running game process that intercepts the physics integrator at two precisely identified offsets, reads the passer and receiver positions from live memory, computes the euclidean distance between them, and dynamically rescales the pass power vector before the engine writes it to the ball — all without modifying any file on disk.
+
+## How the Two-Hook Architecture Works
+
+The mod installs two inline hooks into the unmodified `pes6.exe` binary at startup, both keyed to the runtime base address of the loaded executable:
+
+- **Context Hook (`+1A5905`)** — Fires at the exact moment a pass begins. At this point the CPU registers hold `EDX = passer` and `ESI = receiver`. The hook captures both pointers and stores them so the power stage has full pass context. It replaces 7 bytes (`call pes6.exe+1A1570` / `mov ebx,eax`) with a detour jump, executes the original instructions in the trampoline, and returns transparently.
+
+- **Power Hook (`+1A637B`)** — Fires just before the engine calls the ball-parameter function at `+78020`. At this point `EDI` holds the pre-application power value. The hook reads the context captured by Hook A, computes a distance-based boost factor, rewrites `EDI` with the rescaled value, and lets the original call proceed. It replaces 11 bytes (`push 00` / `push ebp` / `push edi` / `push eax` / `push esi` / `call pes6.exe+78020`).
+
+Before either hook is written, `MemoryPatch::CheckBytes` validates that the expected byte sequence is present at the target address. If validation fails — which would indicate a patched or wrong-version binary — the hook is aborted and an error is written to the log. No byte is ever written to an unvalidated address.
+
+## Key Design Goals
+
+- **Non-destructive patching** — hooks are written entirely in live process memory via `VirtualProtect`/`WriteJump`. No file on disk is touched. The game binary remains byte-identical to the retail release.
+- **Runtime toggle** — press **Ctrl+Shift+P** at any time during gameplay to enable or disable the rescaling. The hotkey thread polls `GetAsyncKeyState` at 25 ms intervals, calls `TogglePhysicsModEnabled()`, and triggers an overlay message.
+- **Ball mass adjustment** — toggling the mod also writes a corrected ball mass float (`198.0` enabled / `188.0` disabled) to address `0x00B8AE70`, complementing the power rescaling.
+- **Optional Kitserver integration** — if `kload.dll` is present in the process, the mod resolves its `HookFunction`/`KDrawText` exports at runtime and installs a `hk_D3D_Present` callback that draws **"FISICAS ACTIVADAS"** or **"FISICAS DESACTIVADAS"** on screen for 2.2 seconds after each toggle. If Kitserver is absent the mod works identically; only the on-screen message is unavailable.
+
+## Key Components
+
+<CardGroup cols={2}>
+  <Card title="PassContext" icon="crosshairs">
+    Installs the Context Hook at `+1A5905`. Captures the passer and receiver pointers from CPU registers at pass-initiation time and exposes them — along with discrete grid coordinates at offsets `+0x204` / `+0x205` — so the power stage can compute euclidean distance.
+  </Card>
+  <Card title="PassPower" icon="bolt">
+    Installs the Power Hook at `+1A637B`. Reads the context from `PassContext`, applies the distance-based rescaling algorithm to the `EDI` power register, and tracks per-pass telemetry (original EDI, modified EDI, boost mode, ball gate mode, awkward-long candidate flag) for the logger.
+  </Card>
+  <Card title="ModState" icon="toggle-on">
+    Owns the global `g_physicsModEnabled` flag (default: enabled) using `InterlockedExchange` for thread-safe access. Also manages ball-mass writes via `MemoryPatch::WriteFloat`. Exposes `IsPhysicsModEnabled`, `SetPhysicsModEnabled`, and `TogglePhysicsModEnabled`.
+  </Card>
+  <Card title="KitserverOverlay" icon="eye">
+    Resolves `kload.dll` exports dynamically at runtime — no link-time dependency on Kitserver headers or libraries. Registers `ABPhysicsPresent` as a `hk_D3D_Present` callback to draw status text centered at `y=26` in the game's 640×480 coordinate space. Degrades gracefully if Kitserver is not loaded.
+  </Card>
+</CardGroup>
+
+<Note>
+  This mod targets the **unmodified Win32 retail build of Pro Evolution Soccer 6**. Both hooks validate the expected byte sequences at their target offsets before writing any detour. If you are running a previously patched executable — or any version other than the standard retail release — `InstallContextHook` or `InstallPowerHook` will abort and log `[ERROR] Fallo instalando hook` rather than write to an incorrect address.
+</Note>
+
+## Project Information
+
+| Field | Value |
+|---|---|
+| Author | pitycharly |
+| Version | 1.0 |
+| Output type | Win32 DLL (`ConfigurationType=DynamicLibrary`) |
+| Language standard | C++20 (`stdcpp20`) |
+| Platform toolset | v145 (Visual Studio 2022) |
+| Target game | Pro Evolution Soccer 6 (Win32 retail) |

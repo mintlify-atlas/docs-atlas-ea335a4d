@@ -1,47 +1,115 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with PES6 Game Physics Mod"
+sidebarTitle: "Quickstart"
+description: "Build the ab_gameplay_mod DLL with Visual Studio 2022, deploy it to your PES6 directory, and verify the hooks are active in under 10 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide walks you from a fresh clone to an active, in-game mod in under ten minutes. By the end you will have a built `pes6_game_physics_mod.dll`, deployed it alongside your PES6 installation, launched the game, and confirmed — either through the Kitserver on-screen overlay or the debug log — that both the Context Hook and the Power Hook have installed successfully and that the pass-power rescaling is live.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Prerequisites">
+    Before you begin, confirm the following are in place:
+
+    - **Visual Studio 2022** with the **Desktop development with C++** workload installed. The project uses platform toolset `v145`; this workload installs it automatically.
+    - **Pro Evolution Soccer 6** installed on Windows. The mod targets the unmodified Win32 retail binary (`pes6.exe`). Note the full path to your PES6 directory — you will need it in Step 4.
+    - **Git** (any recent version) to clone the repository.
+
+    No additional SDKs, libraries, or Kitserver installation are required to build. Kitserver is an optional runtime dependency only.
+  </Step>
+
+  <Step title="Clone the repository and open the solution">
+    Clone the repository and open the Visual Studio solution file:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/angelballay/pes6_game_physics_mod.git
+    cd pes6_game_physics_mod
     ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+    Then open `AB_Gameplay_mod.slnx` in Visual Studio 2022:
 
-    ```bash
-    your-cli start
+    ```
+    File → Open → Project/Solution → AB_Gameplay_mod.slnx
+    ```
+
+    The solution contains a single project: **pes6_game_physics_mod** (root namespace `abgameplaymod`), configured as a `DynamicLibrary` for both Win32 and x64 platforms in Debug and Release configurations.
+  </Step>
+
+  <Step title="Build in Release | Win32 configuration">
+    The game process is 32-bit, so you must build the **Release | Win32** configuration. In the Visual Studio toolbar:
+
+    1. Set the **Solution Configuration** dropdown to `Release`.
+    2. Set the **Solution Platform** dropdown to `Win32`.
+    3. Press **Ctrl+Shift+B** (or **Build → Build Solution**).
+
+    Visual Studio compiles all source files (`dllmain.cpp`, `PassContext.cpp`, `PassPower.cpp`, `ModState.cpp`, `HotkeyToggle.cpp`, `KitserverOverlay.cpp`, `Logger.cpp`, `MemoryPatch.cpp`, `PassPowerConfig.cpp`) using C++20 with the precompiled header `pch.h`. A successful build produces:
+
+    ```
+    ab_gameplay_mod\Release\pes6_game_physics_mod.dll
+    ```
+
+    <Note>
+      The Release configuration enables `WholeProgramOptimization` and `IntrinsicFunctions`. If you need the debug log for troubleshooting, build **Debug | Win32** instead — but still deploy the Win32 (32-bit) DLL.
+    </Note>
+  </Step>
+
+  <Step title="Deploy the DLL to your PES6 directory">
+    Copy the built DLL to your PES6 installation. The exact destination depends on whether you are using Kitserver:
+
+    **Without Kitserver** — use a DLL injector or loader of your choice and point it at `pes6.exe`. Copy the DLL anywhere accessible to your injector, for example directly into the PES6 game folder:
+
+    ```
+    C:\Program Files (x86)\KONAMI\Pro Evolution Soccer 6\
+    └── pes6_game_physics_mod.dll   ← copy here
+    ```
+
+    **With Kitserver** — place the DLL inside Kitserver's `plugins` folder so that `kload.dll` is already loaded in the process before the mod DLL initialises. This is required for the overlay to resolve `kload.dll` exports at runtime:
+
+    ```
+    C:\Program Files (x86)\KONAMI\Pro Evolution Soccer 6\
+    └── kitserver\
+        └── plugins\
+            └── pes6_game_physics_mod.dll   ← copy here
     ```
   </Step>
+
+  <Step title="Launch PES6 and verify the mod is active">
+    Start Pro Evolution Soccer 6 normally. The mod's `DllMain` spawns a background thread (`MainThread`) that waits one second, then installs both hooks and starts the hotkey monitor.
+
+    To verify activation:
+
+    - **Press Ctrl+Shift+P** once the game has loaded into a match. The hotkey thread polls every 25 ms for the `VK_CONTROL + VK_SHIFT + 'P'` combination.
+    - **If Kitserver is present**, the overlay will display **"FISICAS ACTIVADAS"** centred near the top of the screen for approximately 2.2 seconds, in green. Pressing the hotkey again shows **"FISICAS DESACTIVADAS"** in red.
+    - **If Kitserver is not present**, enable the debug log (see note below) and check `D:\pes6_passspeed.log` for the startup banner and hook confirmation lines.
+
+    A successful startup log looks like this:
+
+    ```text
+    ========================================
+    pes6_game_physics_mod.dll cargada.
+    Autor: pitycharly
+    Version: 1.0
+    Descripcion: mod de fisicas de pases desarrollado por pitycharly.
+    ========================================
+    Base del EXE: 0x00400000
+    [OK] Overlay Kitserver activo.
+    [OK] Hotkey activo: Ctrl + Shift + P
+    ```
+
+    And a context + power log entry from an in-game pass:
+
+    ```text
+    [CTX] passId=1 passer=0x12345678 receiver=0x9ABCDEF0 p=(32,18) r=(45,20) dist=13
+    [PWR] passId=1 pwrHit=1 edi=0x00000050->0x00000068 ball50Before=80 dist=13 boostMode=0x1 ...
+    ```
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+<Note>
+  The debug log is **disabled by default** in the shipped source. To enable it, open `Logger.cpp`, change `static const bool ENABLED = false;` to `static const bool ENABLED = true;`, and rebuild. Log entries are appended to `D:\pes6_passspeed.log` — make sure the `D:\` drive exists and is writable, or edit `LOG_PATH` in `Logger.cpp` to a path on your system before rebuilding.
+</Note>
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<Warning>
+  Both hooks validate the exact byte sequence present at their target offsets in the live process before writing any detour. If your `pes6.exe` has been modified by another patch, trainer, or previous mod, the byte check will fail and the log will show `[ERROR] Fallo instalando hook de contexto` or `[ERROR] Fallo instalando hook de potencia`. In this case the mod will exit its main thread without applying any changes. Only the **unmodified retail Win32 binary** is supported.
+</Warning>
