@@ -1,7 +1,7 @@
 ---
-title: "PassContext: Capturing Pass Geometry in PES6"
+title: "PassContext: Capturing Pass Geometry and Distance in PES6"
 sidebarTitle: "Pass Context"
-description: "How PassContext captures passer and receiver memory pointers, reads player cell coordinates, computes discrete distance, and calculates real-world dot-product geometry."
+description: "PassContext records passer and receiver pointers at Hook A, computes Manhattan distance from grid-cell coordinates, and exposes XZ dot-product geometry."
 ---
 
 PassContext is the information-gathering module of the mod. Its sole job is to observe the pass event at the moment PES6 prepares the pass and record which player is passing, which player is receiving, and where they are on the pitch. Without this information, the power calculation module `PassPower` would have no way to distinguish a short tap from a long switch, or to identify an awkward back-foot pass from a clean forward ball. Every piece of data that feeds the rescaling logic — grid distance, world-space vectors, dot products — originates here.
@@ -47,7 +47,7 @@ bool ReadPassContextDistance(
 
 // Reads 3D world positions for passer, receiver, and ball, then computes
 // the normalized dot product between the pass direction vector and the
-// ball-to-passer direction vector.
+// passer-to-ball direction vector.
 bool ReadPassGeometryDot(
     DWORD  passer,
     DWORD  receiver,
@@ -136,8 +136,14 @@ bool ReadPassContextDistance(
     *receiverX = *(BYTE*)(receiver + PesOffsets::PLAYER_CELL_X);
     *receiverY = *(BYTE*)(receiver + PesOffsets::PLAYER_CELL_Y);
 
-    int dx = abs((int)*receiverX - (int)*passerX);
-    int dy = abs((int)*receiverY - (int)*passerY);
+    int dx = (*receiverX >= *passerX)
+        ? (*receiverX - *passerX)
+        : (*passerX   - *receiverX);
+
+    int dy = (*receiverY >= *passerY)
+        ? (*receiverY - *passerY)
+        : (*passerY   - *receiverY);
+
     *distSimple = dx + dy;
     return true;
 }

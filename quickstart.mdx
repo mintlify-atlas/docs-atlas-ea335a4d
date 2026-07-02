@@ -1,5 +1,5 @@
 ---
-title: "Get Started with PES6 Game Physics Mod"
+title: "Get Started: Build and Deploy PES6 Game Physics Mod"
 sidebarTitle: "Quickstart"
 description: "Build the ab_gameplay_mod DLL with Visual Studio 2022, deploy it to your PES6 directory, and verify the hooks are active in under 10 minutes."
 ---
@@ -28,7 +28,7 @@ This guide walks you from a fresh clone to an active, in-game mod in under ten m
 
     Then open `AB_Gameplay_mod.slnx` in Visual Studio 2022:
 
-    ```
+    ```text
     File → Open → Project/Solution → AB_Gameplay_mod.slnx
     ```
 
@@ -44,7 +44,7 @@ This guide walks you from a fresh clone to an active, in-game mod in under ten m
 
     Visual Studio compiles all source files (`dllmain.cpp`, `PassContext.cpp`, `PassPower.cpp`, `ModState.cpp`, `HotkeyToggle.cpp`, `KitserverOverlay.cpp`, `Logger.cpp`, `MemoryPatch.cpp`, `PassPowerConfig.cpp`) using C++20 with the precompiled header `pch.h`. A successful build produces:
 
-    ```
+    ```text
     ab_gameplay_mod\Release\pes6_game_physics_mod.dll
     ```
 
@@ -58,14 +58,14 @@ This guide walks you from a fresh clone to an active, in-game mod in under ten m
 
     **Without Kitserver** — use a DLL injector or loader of your choice and point it at `pes6.exe`. Copy the DLL anywhere accessible to your injector, for example directly into the PES6 game folder:
 
-    ```
+    ```text
     C:\Program Files (x86)\KONAMI\Pro Evolution Soccer 6\
     └── pes6_game_physics_mod.dll   ← copy here
     ```
 
     **With Kitserver** — place the DLL inside Kitserver's `plugins` folder so that `kload.dll` is already loaded in the process before the mod DLL initialises. This is required for the overlay to resolve `kload.dll` exports at runtime:
 
-    ```
+    ```text
     C:\Program Files (x86)\KONAMI\Pro Evolution Soccer 6\
     └── kitserver\
         └── plugins\

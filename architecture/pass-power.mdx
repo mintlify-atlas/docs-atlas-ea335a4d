@@ -1,7 +1,7 @@
 ---
-title: "PassPower: EDI Interception and Rescaling Logic"
+title: "PassPower: EDI Interception and Pass Boost Rescaling Logic"
 sidebarTitle: "Pass Power"
-description: "How CalculateModifiedEDI rescales the raw pass power value using inertia classification, distance-based boost tables, soft floors, and geometric awkward-angle rescue."
+description: "CalculateModifiedEDI step by step: inertia classification, distance boost tables, soft-floor targets, and geometric awkward-angle rescue paths in PES6."
 ---
 
 PassPower is the core computation module of the mod. Every time PES6 calculates pass power and stores it in the `EDI` register at `pes6.exe+1A637B`, Hook B intercepts the value before it is committed to the ball. `CalculateModifiedEDI` then takes the raw `ediOriginal`, classifies the game situation across multiple dimensions (mod state, pass strength, ball inertia, context freshness, grid distance, and spatial geometry), selects an appropriate boost path, and returns a corrected value. The hook applies that value as EDI for the original `call_78020` invocation, so the ball receives the rescaled power rather than the vanilla one.
@@ -41,16 +41,6 @@ extern "C" __declspec(noinline) DWORD __cdecl CalculateModifiedEDI(DWORD ediOrig
     ```
     The hook remains installed at all times. When the mod is toggled off via Ctrl+Shift+P, `CalculateModifiedEDI` returns `ediOriginal` immediately without any modification. `boostMode 0xFE` signals this in the log.
   </Step>
-  <Step title="Early exit — strong pass threshold">
-    ```c
-    if (ediOriginal >= g_passConfig.ediThresholdIgnore)  // 0x6400
-    {
-        g_lastBoostMode = 0x00;
-        return ediOriginal;
-    }
-    ```
-    Passes with a raw EDI at or above `0x6400` are already strong; boosting them further would make long passes unrealistically powerful. These are returned unchanged with `boostMode 0x00`.
-  </Step>
   <Step title="Read ball inertia (ball+0x50 before call_78020)">
     ```c
     DWORD ball50Before = ReadBall50Before();
@@ -71,6 +61,18 @@ extern "C" __declspec(noinline) DWORD __cdecl CalculateModifiedEDI(DWORD ediOrig
     }
     ```
     The five bands (`BALL_ZERO`, `BALL_VERY_LOW`, `BALL_LOW_MID`, `BALL_CARRY`, `BALL_HIGH`) are used as array indices into the `DistanceBoostTable` lookup tables and the `noContextLowBaseBoost` array.
+  </Step>
+  <Step title="Early exit — strong pass threshold">
+    ```c
+    if (ediOriginal >= g_passConfig.ediThresholdIgnore)  // 0x6400
+    {
+        g_lastBoostMode    = 0x00;
+        g_lastBallGateMode = 0x00;
+        g_lastEDIModified  = ediOriginal;
+        return ediOriginal;
+    }
+    ```
+    Passes with a raw EDI at or above `0x6400` are already strong; boosting them further would make long passes unrealistically powerful. These are returned unchanged with `boostMode 0x00`.
   </Step>
   <Step title="No-context path — ApplyNoContextBoost">
     If `g_lastPowerHadNewCtx == 0`, there is no passer/receiver information available. The boost is a flat, band-indexed amount rather than a distance-aware one:
@@ -156,6 +158,16 @@ extern "C" __declspec(noinline) DWORD __cdecl CalculateModifiedEDI(DWORD ediOrig
 
     This adds a small proportional bonus for the middle-distance range (3–6 grid units) without affecting very short or very long passes. It only fires if a positive boost was already applied.
   </Step>
+  <Step title="Re-apply awkwardShort cap after fine-tune">
+    ```c
+    if (awkwardShortRescueApplied && awkwardShortFinalCap != 0 && edi > awkwardShortFinalCap)
+    {
+        edi = awkwardShortFinalCap;
+    }
+    ```
+
+    `ApplyDistance3To6FineTune` can push the result above the `awkwardShortPostEdiMax` (or `awkwardShortRealLongPostEdiMax`) ceiling that was set inside the LOW path. This guard re-enforces that cap so the awkward-short rescue does not inadvertently overshoot its own limit.
+  </Step>
   <Step title="Apply real-distance underestimate rescue">
     ```c
     DWORD ApplyRealDistanceUnderestimateRescue(
@@ -200,7 +212,7 @@ A soft floor moves the value **halfway toward `target`** without hard-setting it
 
 | Value | Meaning |
 |---|---|
-| `0x00` | No change applied (strong pass or mod off) |
+| `0x00` | No change applied — pass at or above `ediThresholdIgnore` (0x6400) |
 | `0x10` | LOW path, dist 0–2, standard |
 | `0x12` | LOW path, dist 3–4 |
 | `0x13` | LOW path, dist 7+ |

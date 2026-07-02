@@ -1,10 +1,10 @@
 ---
-title: "MemoryPatch: Safe x86 JMP Hook Utilities"
+title: "MemoryPatch: Win32 Memory Patching Utilities for PES6"
 sidebarTitle: "MemoryPatch"
-description: "API reference for CheckBytes, WriteJump, and WriteFloat — the low-level Win32 memory patching utilities that validate and inject hooks into the PES6 process."
+description: "API reference for CheckBytes, WriteJump, and WriteFloat — Win32 memory patching utilities that validate and inject x86 JMP hooks into the PES6 process."
 ---
 
-MemoryPatch provides three utility functions used by `InstallContextHook` and `InstallPowerHook`. All operations are guarded with `VirtualProtect` to temporarily make target memory writable before writing, and the original page protection is restored immediately after each operation completes.
+MemoryPatch provides three utility functions used by `InstallContextHook` and `InstallPowerHook`. `WriteJump` and `WriteFloat` call `VirtualProtect` to temporarily make target memory writable before writing and restore the original page protection immediately after. `CheckBytes` does not modify memory — it validates the target bytes inside a Win32 SEH `__try/__except` block without altering page permissions.
 
 ## Functions
 
@@ -41,7 +41,7 @@ Writes an x86 near JMP (`0xE9` + 4-byte relative offset) at `source` that redire
 </ParamField>
 
 <ParamField path="destination" type="void*" required>
-  The address of the hook function (`Hook_Context_1A5905` or `Hook_Power_1A637B`). The 4-byte relative offset is calculated as `(uintptr_t)destination - source - 5`.
+  The address of the hook function (`Hook_Context_1A5905` or `Hook_Power_1A637B`). The 4-byte relative offset is calculated as `(int32_t)(dst - src - 5)`, where `dst = (uintptr_t)destination` and `src = source`.
 </ParamField>
 
 <ParamField path="length" type="size_t" required>

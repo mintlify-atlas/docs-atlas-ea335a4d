@@ -1,7 +1,7 @@
 ---
-title: "PES6 Mod Architecture: Dual Hook Design"
+title: "PES6 Game Physics Mod Architecture: Dual JMP Hook Design"
 sidebarTitle: "Overview"
-description: "How the PES6 Game Physics Mod is structured: DLL entry point, dual JMP hook pipeline, module responsibilities, and data flow from pass initiation to ball application."
+description: "Architecture of the PES6 Game Physics Mod: dual JMP hooks, module layout, and the data flow from pass initiation to ball physics application."
 ---
 
 The PES6 Game Physics Mod is a Win32 DLL that injects itself into the `pes6.exe` process and intercepts the game's pass physics integrator through two x86 JMP hooks. When the DLL is loaded, `DllMain` spawns a background monitor thread (`MainThread`) that waits one second for the game to settle, resolves the executable base address via `GetModuleHandleA`, and then installs both hooks in sequence. From that point forward, every pass event flows through a pipeline: Hook A captures the passer and receiver memory pointers along with their grid-cell coordinates, Hook B intercepts the EDI register that carries the raw pass power value, delegates the value to `CalculateModifiedEDI()`, and feeds the result into the game's original `call_78020` ball-writing routine. A hotkey polling thread (`HotkeyToggle`) allows toggling the entire system at runtime with Ctrl+Shift+P, and an optional Kitserver D3D Present hook renders an on-screen status message when that overlay is available.
@@ -15,7 +15,7 @@ The PES6 Game Physics Mod is a Win32 DLL that injects itself into the `pes6.exe`
 | `PassPower` | **Hook B** at `pes6.exe+1A637B` — saves EDI, calls `CalculateModifiedEDI()` via cdecl, restores computed EDI, runs the original `call_78020` push sequence, then restores the original EDI |
 | `PassPowerConfig` | Defines the `PassPowerConfig` struct and the global `g_passConfig` instance holding all tuning parameters: inertia band limits, distance boost lookup tables, soft-floor targets, awkward-angle rescue thresholds, and EDI caps |
 | `MemoryPatch` | Provides `CheckBytes()` for pre-install byte validation and `WriteJump()` for writing a relative `0xE9` JMP patch with NOP padding and `FlushInstructionCache` |
-| `ModState` | Thread-safe on/off toggle backed by `InterlockedExchange`; when enabled, sets ball mass at `0x00B8AE70` to `198.0f`; when disabled, resets to `188.0f` |
+| `ModState` | Thread-safe on/off toggle backed by `InterlockedExchange` (writes) and `InterlockedCompareExchange` (reads); when enabled, sets ball mass at `0x00B8AE70` to `198.0f`; when disabled, resets to `188.0f` |
 | `HotkeyToggle` | Background thread that polls `GetAsyncKeyState` for Ctrl+Shift+P and calls `TogglePhysicsModEnabled()` |
 | `KitserverOverlay` | Optional hook into the Kitserver D3D Present chain; renders an on-screen message indicating whether the mod is active |
 | `Logger` | File-append debug log; used by all modules via `WriteLog` / `LogFormat` |
@@ -36,7 +36,7 @@ The PES6 Game Physics Mod is a Win32 DLL that injects itself into the `pes6.exe`
     When PES6 reaches `pes6.exe+1A637B`, EDI holds the raw pass power value. `Hook_Power_1A637B` saves EDI, pushes it as the sole argument, and calls `CalculateModifiedEDI()` via the cdecl calling convention.
   </Step>
   <Step title="CalculateModifiedEDI()">
-    Classifies the situation (mod enabled check, strong-pass threshold, ball inertia band, context freshness, distance, geometry) and returns a rescaled power value. All boosts are additive; the value is never reduced below `ediOriginal`.
+    Classifies the situation (mod enabled check, ball inertia band, strong-pass threshold, context freshness, distance, geometry) and returns a rescaled power value. All boosts are additive; the value is never reduced below `ediOriginal`.
   </Step>
   <Step title="Ball modification via call_78020">
     The hook loads the computed EDI into the register, executes the original push sequence (`push 00 / push ebp / push edi / push eax / push esi / call g_call_78020`) which writes the pass power into `ball+0x50`, then restores the original EDI and jumps to `pes6.exe+1A6386`.
@@ -59,7 +59,7 @@ The PES6 Game Physics Mod is a Win32 DLL that injects itself into the `pes6.exe`
     `CheckBytes` validates every expected byte before touching memory. `WriteJump` sets `PAGE_EXECUTE_READWRITE`, writes the `0xE9` opcode plus a 32-bit relative offset, pads remaining bytes with `0x90` NOPs, flushes the instruction cache, and restores the original page protection.
   </Card>
   <Card title="ModState" icon="toggle-on">
-    A single `volatile LONG` protected by `InterlockedExchange` provides a lock-free enabled/disabled flag. Toggling also writes a new ball mass float (`198.0f` / `188.0f`) directly into the game's physics memory at `0x00B8AE70`.
+    A single `volatile LONG` protected by `InterlockedExchange` (writes) and `InterlockedCompareExchange` (reads) provides a lock-free enabled/disabled flag. Toggling also writes a new ball mass float (`198.0f` / `188.0f`) directly into the game's physics memory at `0x00B8AE70`.
   </Card>
   <Card title="HotkeyToggle & Overlay" icon="keyboard">
     A dedicated polling thread watches for the Ctrl+Shift+P chord and flips `ModState`. The optional Kitserver overlay hook surfaces the current mod state on-screen during gameplay without requiring a log viewer.

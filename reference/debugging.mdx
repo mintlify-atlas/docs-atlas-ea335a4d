@@ -1,5 +1,5 @@
 ---
-title: "Debugging and Tuning the PES6 Physics Mod"
+title: "PES6 Physics Mod Debug Log Format and Tuning Guide"
 sidebarTitle: "Debugging"
 description: "How to enable debug logging, interpret per-pass log entries, use boost mode codes to diagnose issues, and tune PassPowerConfig values based on log data."
 ---
@@ -33,6 +33,21 @@ Logging calls `CreateFileA`, `WriteFile`, and `CloseHandle` on the disk path **o
 ## Understanding Log Entries
 
 The monitor thread in `dllmain.cpp` samples `GetContextCount()` and `GetPowerCount()` once per second. When either counter advances since the last sample, a log line is emitted.
+
+### Log Prefix Reference
+
+Every log line begins with a bracketed prefix that identifies the subsystem that produced it.
+
+| Prefix | Source file | Description |
+|---|---|---|
+| `[CTX]` | `dllmain.cpp` | Pass context captured by Hook A. Includes passer/receiver pointers and discrete cell-distance. |
+| `[PWR]` | `dllmain.cpp` | Pass power intercepted by Hook B. Includes EDI before/after, boost mode, geometry, and inertia band. |
+| `[GEOM_CTX]` | `PassContext.cpp` | Geometry diagnostic logged on every Hook A invocation. Includes world positions for passer, receiver, and ball via both the logic-position and physics-struct paths. |
+| `[HOTKEY]` | `HotkeyToggle.cpp` | Hotkey thread lifecycle and each Ctrl+Shift+P toggle event. |
+| `[KSO]` | `KitserverOverlay.cpp` | Kitserver overlay installation, export resolution, and overlay message events. |
+| `[OK]` | various | Successful installation of a hook or subsystem. |
+| `[ERROR]` | various | Failure during hook installation or byte validation. |
+| `[WARN]` | various | Non-fatal condition; operation continues with reduced functionality (e.g., overlay unavailable). |
 
 ### `[CTX]` — Pass Context Entry
 

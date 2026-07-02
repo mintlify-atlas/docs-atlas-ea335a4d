@@ -1,5 +1,5 @@
 ---
-title: "Logger: File-Append Debug Logging"
+title: "Logger: File-Append Debug Logging for PES6 Physics Mod"
 sidebarTitle: "Logger"
 description: "How to enable and read the PES6 mod debug log, with documentation for WriteLog and LogFormat, the metrics logged per pass, and the log file path."
 ---
@@ -39,7 +39,7 @@ The Logger module writes structured debug output to `D:\pes6_passspeed.log`. Log
 void WriteLog(const char* text);
 ```
 
-Appends `text` followed by a CRLF (`\r\n`) line ending to `D:\pes6_passspeed.log`. Opens the file on every call using `CreateFileA` with `FILE_APPEND_DATA` and `OPEN_ALWAYS` (creating the file if it does not exist), writes the string and the line terminator using `WriteFile`, then closes the handle. This append-per-call approach avoids keeping a file handle open across game frames.
+Appends `text` followed by a CRLF (`\r\n`) line ending to `D:\pes6_passspeed.log`. Opens the file on every call using `CreateFileA` with `FILE_APPEND_DATA` as the access mode, `FILE_SHARE_READ` as the share mode, and `OPEN_ALWAYS` as the disposition (creating the file if it does not exist), writes the string and the line terminator using `WriteFile`, then closes the handle. This append-per-call approach avoids keeping a file handle open across game frames.
 
 If `ENABLED = false`, the function returns immediately without any file I/O.
 

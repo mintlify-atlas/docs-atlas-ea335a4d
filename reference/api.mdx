@@ -1,7 +1,7 @@
 ---
-title: "PES6 Game Physics Mod — Full Function Reference"
+title: "PES6 Game Physics Mod — Complete Function Reference"
 sidebarTitle: "API Reference"
-description: "Complete function reference for all public C/C++ functions across PassContext, PassPower, MemoryPatch, ModState, HotkeyToggle, KitserverOverlay, and Logger modules."
+description: "Complete reference for all public C/C++ functions in PassContext, PassPower, MemoryPatch, ModState, HotkeyToggle, KitserverOverlay, and Logger modules."
 ---
 
 This page documents every public function exported or declared in header files across the mod's modules. All functions use standard Win32/C++ calling conventions unless noted as `__cdecl` or `__declspec(naked)`. The two trampoline hooks (`Hook_Context_1A5905` and `Hook_Power_1A637B`) are `__declspec(naked)` and must not be called directly from C++ code — they are installed into the game's code section via `WriteJump`.

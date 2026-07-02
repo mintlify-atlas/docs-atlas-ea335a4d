@@ -1,7 +1,7 @@
 ---
-title: "Installing PES6 Game Physics Mod"
+title: "Installing PES6 Game Physics Mod: Build and Deploy Guide"
 sidebarTitle: "Installation"
-description: "Step-by-step instructions for building from source and deploying the mod DLL into PES6 with or without Kitserver."
+description: "Step-by-step instructions for building the Win32 DLL from source, choosing a deployment mode (Kitserver or standalone), and enabling the debug log."
 ---
 
 PES6 Game Physics Mod ships as a Win32 DLL that must be injected into the `pes6.exe` process at launch. There are two supported deployment modes: **Kitserver-integrated**, where `kload.dll` loads the plugin automatically and the in-game overlay is available; and **standalone**, where you supply your own DLL injector or loader and the overlay is unavailable, but all pass-power physics improvements still function identically. Both modes require a DLL built from the same source; only the placement of the output file differs.
@@ -16,7 +16,7 @@ PES6 Game Physics Mod ships as a Win32 DLL that must be injected into the `pes6.
 
     Open `AB_Gameplay_mod.slnx` in Visual Studio 2022 and build the `pes6_game_physics_mod` project in the **Release | Win32** configuration. The output is:
 
-    ```
+    ```text
     ab_gameplay_mod\Release\pes6_game_physics_mod.dll
     ```
 
@@ -24,7 +24,7 @@ PES6 Game Physics Mod ships as a Win32 DLL that must be injected into the `pes6.
 
     Copy the built DLL into Kitserver's plugin directory so that `kload.dll` is already resident in the process before the mod initialises:
 
-    ```
+    ```text
     <PES6 install dir>\
     └── kitserver\
         └── plugins\
@@ -51,7 +51,7 @@ PES6 Game Physics Mod ships as a Win32 DLL that must be injected into the `pes6.
 
     Open `AB_Gameplay_mod.slnx` in Visual Studio 2022 and build the `pes6_game_physics_mod` project in the **Release | Win32** configuration:
 
-    ```
+    ```text
     ab_gameplay_mod\Release\pes6_game_physics_mod.dll
     ```
 
@@ -59,7 +59,7 @@ PES6 Game Physics Mod ships as a Win32 DLL that must be injected into the `pes6.
 
     Copy the DLL to any accessible location — placing it directly in the PES6 game directory is a common convention:
 
-    ```
+    ```text
     <PES6 install dir>\
     └── pes6.exe
     └── pes6_game_physics_mod.dll

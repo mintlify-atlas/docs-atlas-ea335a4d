@@ -1,7 +1,7 @@
 ---
-title: "How JMP Hook Injection Works in PES6"
+title: "JMP Hook Injection in PES6: Byte Validation and Patching"
 sidebarTitle: "Hook System"
-description: "Deep dive into the JMP hook injection technique used to intercept PES6's physics integrator: byte validation, relative JMP patching, and safe restoration of original calls."
+description: "The JMP hook injection technique used in PES6: byte validation, relative JMP patching, NOP padding, and safe re-execution of displaced original calls."
 ---
 
 The mod uses a classic x86 trampoline technique: the installer overwrites a small run of original bytes at a known offset inside `pes6.exe` with a single relative `JMP` instruction (`0xE9` + rel32), redirecting execution into a naked C function. That function saves any registers it needs, runs additional C logic, re-executes the original instructions that were displaced by the patch, and finally jumps back to the instruction immediately following the patched region. This design means no original game logic is permanently lost — the hook merely wraps it.
@@ -150,7 +150,7 @@ extern "C" __declspec(naked) void Hook_Power_1A637B()
 | Symbol | Value | Description |
 |---|---|---|
 | Hook site | `base + 0x1A637B` | Where the JMP is written |
-| `g_call_78020` | `base + 0x78020` | Ball-writing routine; receives pass power via EDI on the stack |
+| `g_call_78020` | `base + 0x78020` | Ball-writing routine; receives the pass power value pushed via `push edi`, and writes it into `ball+0x50` |
 | `g_powerReturn` | `base + 0x1A6386` | Return address (byte immediately after the 11-byte patch) |
 
 <Note>

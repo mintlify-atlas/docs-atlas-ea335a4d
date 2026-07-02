@@ -1,7 +1,7 @@
 ---
-title: "PassPowerConfig: Full Configuration Reference"
+title: "PassPowerConfig: Complete Struct and Field Reference"
 sidebarTitle: "Config Reference"
-description: "Complete reference for the PassPowerConfig struct and g_passConfig global — every field, its default value, and how it affects pass power calculation in PES6."
+description: "Every field in PassPowerConfig with its default value and effect on pass power — inertia limits, EDI thresholds, boost bases, rescues, and soft floors."
 ---
 
 All tuning parameters for the pass power mod live in the `PassPowerConfig` struct defined in `PassPowerConfig.h` and fully initialized in `PassPowerConfig.cpp`. The single global instance, `g_passConfig`, is read at runtime by every path inside `CalculateModifiedEDI`. Because the struct is a plain C aggregate, changing any value and recompiling immediately alters in-game behavior without touching hook, context, or geometry code.

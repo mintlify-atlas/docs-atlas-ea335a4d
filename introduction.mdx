@@ -1,5 +1,5 @@
 ---
-title: "PES6 Game Physics Mod: Pass Power Enhancement"
+title: "PES6 Game Physics Mod: Pass Power Enhancement Plugin"
 sidebarTitle: "Introduction"
 description: "Learn how PES6 Game Physics Mod fixes dead-pass inertia in Pro Evolution Soccer 6 using runtime DLL hooks and distance-aware power rescaling."
 ---
@@ -10,7 +10,7 @@ Pro Evolution Soccer 6's pass engine has a well-known flaw: first-touch passes �
 
 The mod installs two inline hooks into the unmodified `pes6.exe` binary at startup, both keyed to the runtime base address of the loaded executable:
 
-- **Context Hook (`+1A5905`)** — Fires at the exact moment a pass begins. At this point the CPU registers hold `EDX = passer` and `ESI = receiver`. The hook captures both pointers and stores them so the power stage has full pass context. It replaces 7 bytes (`call pes6.exe+1A1570` / `mov ebx,eax`) with a detour jump, executes the original instructions in the trampoline, and returns transparently.
+- **Context Hook (`+1A5905`)** — Fires at the exact moment a pass begins. At this point the CPU registers hold `ESI = passer` and `EDX = receiver`. The hook captures both pointers and stores them so the power stage has full pass context. It replaces 7 bytes (`call pes6.exe+1A1570` / `mov ebx,eax`) with a detour jump, executes the original instructions in the trampoline, and returns transparently.
 
 - **Power Hook (`+1A637B`)** — Fires just before the engine calls the ball-parameter function at `+78020`. At this point `EDI` holds the pre-application power value. The hook reads the context captured by Hook A, computes a distance-based boost factor, rewrites `EDI` with the rescaled value, and lets the original call proceed. It replaces 11 bytes (`push 00` / `push ebp` / `push edi` / `push eax` / `push esi` / `call pes6.exe+78020`).
 
